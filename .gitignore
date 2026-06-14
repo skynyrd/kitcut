@@ -1,0 +1,29 @@
+# Planning docs (local only)
+.plan/
+
+# Python
+backend/.venv/
+**/__pycache__/
+*.pyc
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Media working files (uploads, extracted audio, renders)
+media/
+
+# Whisper models
+models/
+
+# Sample / scratch media (large, not for VCS)
+/sample_*
+*.mp4
+*.MP4
+*.mov
+*.MOV
+
+# Env & editor
+.env
+.env.*
+.DS_Store
