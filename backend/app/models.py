@@ -88,6 +88,7 @@ class Project(BaseModel):
     width: int | None = None
     height: int | None = None
     fps: float | None = None
+    audio_rate: int | None = None
     language: str | None = None
     aligned: bool = False
     align_error: str | None = None

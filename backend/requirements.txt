@@ -4,3 +4,6 @@ python-multipart
 pydantic
 websockets
 faster-whisper
+whisperx
+certifi
+pyobjc-framework-Cocoa ; sys_platform == "darwin"

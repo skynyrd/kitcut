@@ -54,6 +54,9 @@ def probe(path: Path) -> dict:
         "height": video.get("height") if video else None,
         "fps": _fraction(video.get("avg_frame_rate")) if video else None,
         "has_audio": audio is not None,
+        "audio_rate": int(audio["sample_rate"])
+        if audio and audio.get("sample_rate")
+        else None,
     }
 
 

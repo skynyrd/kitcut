@@ -6,13 +6,13 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import cuts as cutlib
-from . import ffmpeg_utils, storage, vad
+from . import fcpxml, ffmpeg_utils, storage, subtitles, vad
 from .jobs import jobs
 from .models import CutParams, CutRegion, CutSource, Project, ProjectStatus
 from .transcribe import DEFAULT_MODEL, transcribe
@@ -82,6 +82,7 @@ async def create_project(file: UploadFile) -> Project:
         width=meta["width"],
         height=meta["height"],
         fps=meta["fps"],
+        audio_rate=meta.get("audio_rate"),
     )
     storage.save_project(project)
     return project
@@ -158,6 +159,33 @@ def replace_cuts(project_id: str, regions: list[CutRegion]) -> dict:
     project.cuts = regions
     storage.save_project(project)
     return cutlib.cuts_payload(project)
+
+
+@app.get("/api/projects/{project_id}/export/fcpxml")
+def export_fcpxml(project_id: str) -> Response:
+    project = _require_project(project_id)
+    src = storage.find_source(project_id)
+    if src is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    xml = fcpxml.build_fcpxml(project, src)
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project.name) or "kitcut"
+    return Response(
+        content=xml,
+        media_type="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.fcpxml"'},
+    )
+
+
+@app.get("/api/projects/{project_id}/export/srt")
+def export_srt(project_id: str) -> Response:
+    project = _require_project(project_id)
+    srt = subtitles.build_srt(project)
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project.name) or "kitcut"
+    return Response(
+        content=srt,
+        media_type="application/x-subrip",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.srt"'},
+    )
 
 
 class RemovedWords(BaseModel):

@@ -9,10 +9,12 @@ import {
   audioUrl,
   createProject,
   editWordText,
+  fcpxmlUrl,
   getHealth,
   getProject,
   replaceCuts,
   setRemovedWords,
+  srtUrl,
   startTranscribe,
   updateCutParams,
   videoUrl,
@@ -47,6 +49,7 @@ function App() {
   const [revision, setRevision] = useState(0)
   const [cutBusy, setCutBusy] = useState(false)
   const [preview, setPreview] = useState(true)
+  const [subs, setSubs] = useState(true)
   const [currentTime, setCurrentTime] = useState(0)
 
   const closeWs = useRef<(() => void) | null>(null)
@@ -74,6 +77,29 @@ function App() {
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth(null))
     return () => closeWs.current?.()
+  }, [])
+
+  // Spacebar toggles play/pause anywhere (except while typing in a field)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' && e.key !== ' ') return
+      const ae = document.activeElement as HTMLElement | null
+      if (
+        ae &&
+        (ae.tagName === 'INPUT' ||
+          ae.tagName === 'TEXTAREA' ||
+          ae.tagName === 'SELECT' ||
+          ae.isContentEditable)
+      )
+        return
+      const v = videoRef.current
+      if (!v) return
+      e.preventDefault()
+      if (v.paused) void v.play()
+      else v.pause()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   async function onUpload(e: ChangeEvent<HTMLInputElement>) {
@@ -263,6 +289,23 @@ function App() {
   }
 
   const transcribed = project?.status === 'transcribed'
+  const activeSub =
+    subs && project
+      ? (() => {
+          const seg = project.segments.find(
+            (s) => currentTime >= s.start && currentTime < s.end,
+          )
+          if (!seg) return undefined
+          const text = seg.words.length
+            ? seg.words
+                .filter((w) => !w.removed)
+                .map((w) => w.text)
+                .join('')
+                .trim()
+            : seg.text
+          return text || undefined
+        })()
+      : undefined
 
   return (
     <main className="app">
@@ -326,14 +369,25 @@ function App() {
 
           <div className="workspace">
             <section className="panel pane video-pane">
-              <video
-                ref={videoRef}
-                className="video"
-                controls
-                src={videoUrl(project.id)}
-                key={project.id}
-                onTimeUpdate={onTimeUpdate}
-              />
+              <div className="video-wrap">
+                <video
+                  ref={videoRef}
+                  className="video"
+                  controls
+                  src={videoUrl(project.id)}
+                  key={project.id}
+                  onTimeUpdate={onTimeUpdate}
+                />
+                {activeSub && <div className="subtitle-overlay">{activeSub}</div>}
+              </div>
+              <label className="check inline cc-toggle">
+                <input
+                  type="checkbox"
+                  checked={subs}
+                  onChange={(e) => setSubs(e.target.checked)}
+                />
+                Subtitles on video
+              </label>
             </section>
 
             <section className="panel pane transcript-pane">
@@ -353,14 +407,22 @@ function App() {
             <section className="panel timeline-area">
               <div className="panel-head">
                 <h2>Timeline</h2>
-                <label className="check inline">
-                  <input
-                    type="checkbox"
-                    checked={preview}
-                    onChange={(e) => setPreview(e.target.checked)}
-                  />
-                  Preview (skip cuts on playback)
-                </label>
+                <div className="head-tools">
+                  <label className="check inline">
+                    <input
+                      type="checkbox"
+                      checked={preview}
+                      onChange={(e) => setPreview(e.target.checked)}
+                    />
+                    Preview (skip cuts on playback)
+                  </label>
+                  <a className="export-btn" href={fcpxmlUrl(project.id)}>
+                    Export FCPXML
+                  </a>
+                  <a className="export-btn" href={srtUrl(project.id)}>
+                    Export SRT
+                  </a>
+                </div>
               </div>
               <CutTrack
                 audioUrl={audioUrl(project.id)}

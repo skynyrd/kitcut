@@ -191,6 +191,14 @@ export function audioUrl(id: string): string {
   return `/api/projects/${id}/audio`
 }
 
+export function fcpxmlUrl(id: string): string {
+  return `/api/projects/${id}/export/fcpxml`
+}
+
+export function srtUrl(id: string): string {
+  return `/api/projects/${id}/export/srt`
+}
+
 /** Open a WebSocket to stream job progress. Returns a close function. */
 export function watchJob(
   jobId: string,
