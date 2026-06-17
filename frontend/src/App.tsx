@@ -6,38 +6,61 @@ import {
   type SyntheticEvent,
 } from 'react'
 import {
+  addReelVideos,
   audioUrl,
-  createProject,
+  createReel,
   editWordText,
   fcpxmlUrl,
+  getCuts,
   getHealth,
   getProject,
+  getReel,
+  getReelTimeline,
+  reelFcpxmlUrl,
+  removeReelVideo,
+  reorderReel,
   replaceCuts,
   setRemovedWords,
-  srtUrl,
   startTranscribe,
   updateCutParams,
+  updateReelCutParams,
   videoUrl,
   watchJob,
+  type ClipSummary,
   type CutParams,
   type CutRegion,
   type CutStats,
   type Health,
   type Project,
+  type Reel,
+  type ReelDetail,
+  type ReelTimeline as ReelTimelineData,
 } from './api'
 import { CutTrack } from './components/CutTrack'
+import { ReelSidebar } from './components/ReelSidebar'
+import { ReelTimeline } from './components/ReelTimeline'
 import { SilenceControls } from './components/SilenceControls'
 import { TranscriptView } from './components/TranscriptView'
 import './App.css'
 
 const MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3']
+const REEL_KEY = 'kitcut.reelId'
 
 function App() {
   const [health, setHealth] = useState<Health | null>(null)
+
+  // reel state
+  const [reel, setReel] = useState<Reel | null>(null)
+  const [clips, setClips] = useState<ClipSummary[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [busyIds, setBusyIds] = useState<string[]>([])
+  const [timeline, setTimeline] = useState<ReelTimelineData | null>(null)
+  const [globalTime, setGlobalTime] = useState(0)
+
+  // active-clip editing state
   const [project, setProject] = useState<Project | null>(null)
   const [model, setModel] = useState('small')
   const [language, setLanguage] = useState('auto')
-  const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
   const [progressMsg, setProgressMsg] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -49,11 +72,11 @@ function App() {
   const [stats, setStats] = useState<CutStats | null>(null)
   const [revision, setRevision] = useState(0)
   const [cutBusy, setCutBusy] = useState(false)
+  const [scope, setScope] = useState<'all' | 'clip'>('all')
   const [preview, setPreview] = useState(true)
   const [subs, setSubs] = useState(true)
   const [currentTime, setCurrentTime] = useState(0)
 
-  const closeWs = useRef<(() => void) | null>(null)
   const paramTimer = useRef<number | null>(null)
   const cutTimer = useRef<number | null>(null)
   const wordTimer = useRef<number | null>(null)
@@ -62,7 +85,21 @@ function App() {
   const previewRef = useRef(preview)
   previewRef.current = preview
 
-  // remove spans (complement of kept) drive preview-skip
+  // refs to read latest values inside async job/video callbacks
+  const reelRef = useRef(reel)
+  reelRef.current = reel
+  const activeIdRef = useRef(activeId)
+  activeIdRef.current = activeId
+  const modelRef = useRef(model)
+  modelRef.current = model
+  const languageRef = useRef(language)
+  languageRef.current = language
+  const timelineRef = useRef(timeline)
+  timelineRef.current = timeline
+  const pendingSeekRef = useRef<number | null>(null)
+  const pendingPlayRef = useRef(false)
+
+  // remove spans (complement of kept) drive preview-skip within the active clip
   removesRef.current = (() => {
     const dur = project?.duration ?? 0
     const out: [number, number][] = []
@@ -75,9 +112,46 @@ function App() {
     return out
   })()
 
+  function activeOffset(): number {
+    const tl = timelineRef.current
+    return tl?.clips.find((c) => c.id === activeIdRef.current)?.offset ?? 0
+  }
+
+  async function refreshTimeline() {
+    const r = reelRef.current
+    if (!r) return
+    try {
+      setTimeline(await getReelTimeline(r.id))
+    } catch {
+      /* timeline overlay is best-effort */
+    }
+  }
+
+  // bootstrap: health + open or create a reel
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth(null))
-    return () => closeWs.current?.()
+    ;(async () => {
+      try {
+        const stored = localStorage.getItem(REEL_KEY)
+        let detail: ReelDetail | null = null
+        if (stored) {
+          try {
+            detail = await getReel(stored)
+          } catch {
+            detail = null
+          }
+        }
+        if (!detail) detail = await createReel()
+        setReel(detail.reel)
+        setClips(detail.clips)
+        reelRef.current = detail.reel
+        localStorage.setItem(REEL_KEY, detail.reel.id)
+        await refreshTimeline()
+        if (detail.clips.length) void selectClip(detail.clips[0].id)
+      } catch (e) {
+        setError(String(e))
+      }
+    })()
   }, [])
 
   // Spacebar toggles play/pause anywhere (except while typing in a field)
@@ -103,33 +177,213 @@ function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  async function onUpload(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    resetCutState()
-    setProject(null)
+  // keep the global playhead correct when offsets change (reorder) or clip switches
+  useEffect(() => {
+    setGlobalTime(activeOffset() + (videoRef.current?.currentTime ?? 0))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeline, activeId])
+
+  async function selectClip(id: string, force = false) {
+    if (!force && id === activeIdRef.current) return
+    setActiveId(id)
+    activeIdRef.current = id
+    setCurrentTime(0)
+    try {
+      const p = await getProject(id)
+      setProject(p)
+      const payload = await getCuts(id)
+      setCutParams(payload.cut_params)
+      setCuts(payload.cuts)
+      setWordCuts(payload.word_cuts)
+      setKept(payload.kept)
+      setStats(payload.stats)
+      setRevision((r) => r + 1)
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  // jump to a clip in the player (used by the sidebar)
+  function gotoClip(id: string, localSeek = 0) {
+    if (id === activeIdRef.current) {
+      const v = videoRef.current
+      if (v) v.currentTime = localSeek
+      return
+    }
+    pendingSeekRef.current = localSeek
+    void selectClip(id)
+  }
+
+  // scrub the unified timeline -> seek the right clip at the right local time
+  function onScrub(g: number) {
+    const tl = timelineRef.current
+    if (!tl) return
+    setGlobalTime(g)
+    let target = tl.clips[0]
+    for (const c of tl.clips) {
+      if (g >= c.offset && g < c.offset + c.duration) {
+        target = c
+        break
+      }
+      if (g >= c.offset) target = c
+    }
+    if (!target) return
+    const local = Math.max(0, g - target.offset)
+    if (target.id === activeIdRef.current) {
+      const v = videoRef.current
+      if (v) v.currentTime = local
+    } else {
+      pendingSeekRef.current = local
+      void selectClip(target.id, true)
+    }
+  }
+
+  function onVideoEnded() {
+    const tl = timelineRef.current
+    if (!tl) return
+    const idx = tl.clips.findIndex((c) => c.id === activeIdRef.current)
+    const next = idx >= 0 ? tl.clips[idx + 1] : undefined
+    if (next) {
+      pendingSeekRef.current = 0
+      pendingPlayRef.current = true
+      void selectClip(next.id, true)
+    }
+  }
+
+  function onVideoLoaded() {
+    const v = videoRef.current
+    if (!v) return
+    if (pendingSeekRef.current != null) {
+      v.currentTime = pendingSeekRef.current
+      pendingSeekRef.current = null
+    }
+    if (pendingPlayRef.current) {
+      pendingPlayRef.current = false
+      void v.play()
+    }
+    setGlobalTime(activeOffset() + v.currentTime)
+  }
+
+  async function onAddVideos(files: File[]) {
+    if (!reelRef.current) return
     setError(null)
-    setBusy(true)
     setProgressMsg('uploading…')
     try {
-      setProject(await createProject(file))
-    } catch (err) {
-      setError(String(err))
+      const detail = await addReelVideos(reelRef.current.id, files)
+      setReel(detail.reel)
+      setClips(detail.clips)
+      await refreshTimeline()
+      if (!activeIdRef.current && detail.clips.length) void selectClip(detail.clips[0].id)
+    } catch (e) {
+      setError(String(e))
     } finally {
-      setBusy(false)
       setProgressMsg('')
     }
   }
 
-  function resetCutState() {
-    setCutParams(null)
-    setCuts([])
-    setWordCuts([])
-    setStats(null)
+  async function onRemoveClip(id: string) {
+    if (!reelRef.current) return
+    try {
+      const detail = await removeReelVideo(reelRef.current.id, id)
+      setReel(detail.reel)
+      setClips(detail.clips)
+      await refreshTimeline()
+      if (activeIdRef.current === id) {
+        const next = detail.clips[0]?.id ?? null
+        if (next) void selectClip(next, true)
+        else {
+          setActiveId(null)
+          activeIdRef.current = null
+          setProject(null)
+        }
+      }
+    } catch (e) {
+      setError(String(e))
+    }
   }
 
-  async function loadCuts(p: Project) {
-    const payload = await updateCutParams(p.id, p.cut_params)
+  async function onReorder(ids: string[]) {
+    if (!reelRef.current) return
+    setClips(
+      (prev) => ids.map((id) => prev.find((c) => c.id === id)).filter(Boolean) as ClipSummary[],
+    )
+    try {
+      const detail = await reorderReel(reelRef.current.id, ids)
+      setReel(detail.reel)
+      setClips(detail.clips)
+      await refreshTimeline()
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  function transcribeClip(id: string): Promise<void> {
+    return new Promise((resolve) => {
+      startTranscribe(
+        id,
+        modelRef.current,
+        languageRef.current === 'auto' ? null : languageRef.current,
+      )
+        .then((jobId) => {
+          setError(null)
+          setBusyIds((s) => (s.includes(id) ? s : [...s, id]))
+          const close = watchJob(jobId, async (ev) => {
+            if (id === activeIdRef.current) {
+              setProgress(ev.progress)
+              setProgressMsg(ev.message || ev.state)
+            }
+            if (ev.state === 'done') {
+              const reelNow = reelRef.current
+              try {
+                if (reelNow) await updateCutParams(id, reelNow.default_cut_params)
+              } catch {
+                /* cuts compute is best-effort */
+              }
+              try {
+                if (reelNow) {
+                  const detail = await getReel(reelNow.id)
+                  setReel(detail.reel)
+                  setClips(detail.clips)
+                }
+                await refreshTimeline()
+              } catch {
+                /* ignore refresh failure */
+              }
+              if (id === activeIdRef.current) await selectClip(id, true)
+              setBusyIds((s) => s.filter((x) => x !== id))
+              close()
+              resolve()
+            } else if (ev.state === 'error') {
+              setError(ev.error || 'transcription failed')
+              setBusyIds((s) => s.filter((x) => x !== id))
+              close()
+              resolve()
+            }
+          })
+        })
+        .catch((e) => {
+          setError(String(e))
+          resolve()
+        })
+    })
+  }
+
+  async function onTranscribeActive() {
+    if (activeId) await transcribeClip(activeId)
+  }
+
+  async function onTranscribeAll() {
+    const targets = clips
+      .filter((c) => !c.transcribed && !busyIds.includes(c.id))
+      .map((c) => c.id)
+    for (const id of targets) {
+      await transcribeClip(id) // sequential: bounds Whisper memory
+    }
+  }
+
+  // refresh the active clip's editing state from its stored cuts
+  async function reloadActiveCuts(id: string) {
+    const payload = await getCuts(id)
     setCutParams(payload.cut_params)
     setCuts(payload.cuts)
     setWordCuts(payload.word_cuts)
@@ -138,52 +392,32 @@ function App() {
     setRevision((r) => r + 1)
   }
 
-  async function onTranscribe() {
-    if (!project) return
-    setError(null)
-    setBusy(true)
-    setProgress(0)
-    setProgressMsg('starting…')
-    try {
-      const jobId = await startTranscribe(
-        project.id,
-        model,
-        language === 'auto' ? null : language,
-      )
-      closeWs.current?.()
-      closeWs.current = watchJob(jobId, async (ev) => {
-        setProgress(ev.progress)
-        setProgressMsg(ev.message || ev.state)
-        if (ev.state === 'done') {
-          const fresh = await getProject(project.id)
-          setProject(fresh)
-          await loadCuts(fresh).catch((e) => setError(String(e)))
-          setBusy(false)
-        } else if (ev.state === 'error') {
-          setError(ev.error || 'transcription failed')
-          setBusy(false)
-        }
-      })
-    } catch (err) {
-      setError(String(err))
-      setBusy(false)
-    }
-  }
-
   function applyParams(next: CutParams) {
-    setCutParams(next)
-    if (!project) return
+    // optimistic: 'all' edits the reel default, 'clip' edits the active clip
+    if (scope === 'all') setReel((r) => (r ? { ...r, default_cut_params: next } : r))
+    else setCutParams(next)
+
+    const id = activeIdRef.current
+    const r = reelRef.current
     if (paramTimer.current) clearTimeout(paramTimer.current)
     setCutBusy(true)
     paramTimer.current = window.setTimeout(async () => {
       try {
-        const payload = await updateCutParams(project.id, next)
-        setCutParams(payload.cut_params)
-        setCuts(payload.cuts)
-        setWordCuts(payload.word_cuts)
-        setKept(payload.kept)
-        setStats(payload.stats)
-        setRevision((r) => r + 1)
+        if (scope === 'all' && r) {
+          const detail = await updateReelCutParams(r.id, next, 'all')
+          setReel(detail.reel)
+          setClips(detail.clips)
+          if (id) await reloadActiveCuts(id)
+        } else if (id) {
+          const payload = await updateCutParams(id, next)
+          setCutParams(payload.cut_params)
+          setCuts(payload.cuts)
+          setWordCuts(payload.word_cuts)
+          setKept(payload.kept)
+          setStats(payload.stats)
+          setRevision((x) => x + 1)
+        }
+        await refreshTimeline()
       } catch (e) {
         setError(String(e))
       } finally {
@@ -194,13 +428,15 @@ function App() {
 
   function onCutsChange(next: CutRegion[]) {
     setCuts(next)
-    if (!project) return
+    const id = activeIdRef.current
+    if (!id) return
     if (cutTimer.current) clearTimeout(cutTimer.current)
     cutTimer.current = window.setTimeout(async () => {
       try {
-        const payload = await replaceCuts(project.id, next)
+        const payload = await replaceCuts(id, next)
         setKept(payload.kept)
         setStats(payload.stats)
+        await refreshTimeline()
       } catch (e) {
         setError(String(e))
       }
@@ -208,7 +444,8 @@ function App() {
   }
 
   function persistRemovedWords(segments: Project['segments']) {
-    if (!project) return
+    const id = activeIdRef.current
+    if (!id) return
     const removed: [number, number][] = []
     segments.forEach((seg) =>
       seg.words.forEach((w, i) => {
@@ -218,10 +455,11 @@ function App() {
     if (wordTimer.current) clearTimeout(wordTimer.current)
     wordTimer.current = window.setTimeout(async () => {
       try {
-        const payload = await setRemovedWords(project.id, removed)
+        const payload = await setRemovedWords(id, removed)
         setWordCuts(payload.word_cuts)
         setKept(payload.kept)
         setStats(payload.stats)
+        await refreshTimeline()
       } catch (e) {
         setError(String(e))
       }
@@ -272,7 +510,8 @@ function App() {
       )
       return { ...prev, segments }
     })
-    if (project) editWordText(project.id, segId, idx, text).catch((e) => setError(String(e)))
+    const id = activeIdRef.current
+    if (id) editWordText(id, segId, idx, text).catch((e) => setError(String(e)))
   }
 
   function seek(t: number) {
@@ -284,6 +523,7 @@ function App() {
     const v = e.currentTarget
     const t = v.currentTime
     setCurrentTime(t)
+    setGlobalTime(activeOffset() + t)
     if (!previewRef.current) return
     for (const [s, end] of removesRef.current) {
       if (t >= s && t < end - 0.02) {
@@ -293,7 +533,13 @@ function App() {
     }
   }
 
+  function onModel(e: ChangeEvent<HTMLSelectElement>) {
+    setModel(e.target.value)
+  }
+
   const transcribed = project?.status === 'transcribed'
+  const activeBusy = activeId ? busyIds.includes(activeId) : false
+  const totals = timeline?.totals
   const activeSub =
     subs && project
       ? (() => {
@@ -320,133 +566,177 @@ function App() {
           {health?.ffmpeg ? 'backend ok' : 'backend down'}
         </span>
       </header>
-      <p className="tagline">silence-cutting + transcript editing</p>
+      <p className="tagline">multi-video silence-cutting + transcript editing</p>
 
       {error && <p className="bad error-box">{error}</p>}
 
-      <section className="panel">
-        <input type="file" accept="video/*" onChange={onUpload} disabled={busy} />
-        {project && (
-          <div className="meta">
-            <strong>{project.name}</strong> · {project.duration?.toFixed(1)}s ·{' '}
-            {project.width}×{project.height} · status: {project.status}
-            {project.language && ` · ${project.language}`}
-          </div>
-        )}
-      </section>
+      <div className="reel-layout">
+        <ReelSidebar
+          clips={clips}
+          activeId={activeId}
+          busyIds={busyIds}
+          onSelect={(id) => gotoClip(id, 0)}
+          onReorder={onReorder}
+          onRemove={onRemoveClip}
+          onAddVideos={onAddVideos}
+          onTranscribeAll={onTranscribeAll}
+        />
 
-      {project && (
-        <>
-          <section className="panel controls">
-            <label>
-              Model{' '}
-              <select value={model} onChange={(e) => setModel(e.target.value)} disabled={busy}>
-                {MODELS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                    {m === 'medium' || m === 'large-v3' ? ' (better TR)' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Language{' '}
-              <select
-                value={language}
-                onChange={(e) => setLanguage(e.target.value)}
-                disabled={busy}
-              >
-                <option value="auto">auto</option>
-                <option value="tr">Turkish</option>
-                <option value="en">English</option>
-              </select>
-            </label>
-            <button onClick={onTranscribe} disabled={busy}>
-              {busy ? 'working…' : transcribed ? 'Re-transcribe' : 'Transcribe'}
-            </button>
-            {busy && (
-              <div className="progress">
-                <div className="bar" style={{ width: `${Math.round(progress * 100)}%` }} />
-                <span className="progress-label">{progressMsg}</span>
-              </div>
-            )}
-          </section>
-
-          <div className="workspace">
-            <section className="panel pane video-pane">
-              <div className="video-wrap">
-                <video
-                  ref={videoRef}
-                  className="video"
-                  controls
-                  src={videoUrl(project.id)}
-                  key={project.id}
-                  onTimeUpdate={onTimeUpdate}
-                />
-                {activeSub && <div className="subtitle-overlay">{activeSub}</div>}
-              </div>
-              <label className="check inline cc-toggle">
-                <input
-                  type="checkbox"
-                  checked={subs}
-                  onChange={(e) => setSubs(e.target.checked)}
-                />
-                Subtitles on video
-              </label>
-            </section>
-
-            <section className="panel pane transcript-pane">
-              <h2>Transcript</h2>
-              <TranscriptView
-                segments={project.segments}
-                currentTime={currentTime}
-                onToggleWord={toggleWord}
-                onToggleSegment={toggleSegment}
-                onSeek={seek}
-                onEditWord={editWord}
-              />
-            </section>
-          </div>
-
-          {transcribed && cutParams && (
-            <section className="panel timeline-area">
-              <div className="panel-head">
-                <h2>Timeline</h2>
-                <div className="head-tools">
-                  <label className="check inline">
-                    <input
-                      type="checkbox"
-                      checked={preview}
-                      onChange={(e) => setPreview(e.target.checked)}
-                    />
-                    Preview (skip cuts on playback)
-                  </label>
-                  <a className="export-btn" href={fcpxmlUrl(project.id)}>
-                    Export FCPXML
-                  </a>
-                  <a className="export-btn" href={srtUrl(project.id)}>
-                    Export SRT
-                  </a>
-                </div>
-              </div>
-              <CutTrack
-                audioUrl={audioUrl(project.id)}
-                cuts={cuts}
-                wordCuts={wordCuts}
-                revision={revision}
-                onCutsChange={onCutsChange}
-                videoRef={videoRef}
-              />
-              <SilenceControls
-                params={cutParams}
-                stats={stats}
-                busy={cutBusy}
-                onChange={applyParams}
-              />
+        <div className="editor">
+          {!project && (
+            <section className="panel muted">
+              Add videos with “+ Add videos”, then select one to start editing.
             </section>
           )}
-        </>
-      )}
+
+          {project && (
+            <>
+              <section className="panel controls">
+                <label>
+                  Model{' '}
+                  <select value={model} onChange={onModel} disabled={activeBusy}>
+                    {MODELS.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                        {m === 'medium' || m === 'large-v3' ? ' (better TR)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Language{' '}
+                  <select
+                    value={language}
+                    onChange={(e) => setLanguage(e.target.value)}
+                    disabled={activeBusy}
+                  >
+                    <option value="auto">auto</option>
+                    <option value="tr">Turkish</option>
+                    <option value="en">English</option>
+                  </select>
+                </label>
+                <button onClick={onTranscribeActive} disabled={activeBusy}>
+                  {activeBusy ? 'working…' : transcribed ? 'Re-transcribe' : 'Transcribe'}
+                </button>
+                {activeBusy && (
+                  <div className="progress">
+                    <div className="bar" style={{ width: `${Math.round(progress * 100)}%` }} />
+                    <span className="progress-label">{progressMsg}</span>
+                  </div>
+                )}
+                <div className="meta">
+                  <strong>{project.name}</strong> · {project.duration?.toFixed(1)}s ·{' '}
+                  {project.width}×{project.height} · {project.status}
+                  {project.language && ` · ${project.language}`}
+                </div>
+              </section>
+
+              <div className="workspace">
+                <section className="panel pane video-pane">
+                  <div className="video-wrap">
+                    <video
+                      ref={videoRef}
+                      className="video"
+                      controls
+                      src={videoUrl(project.id)}
+                      key={project.id}
+                      onTimeUpdate={onTimeUpdate}
+                      onLoadedMetadata={onVideoLoaded}
+                      onEnded={onVideoEnded}
+                    />
+                    {activeSub && <div className="subtitle-overlay">{activeSub}</div>}
+                  </div>
+                  <label className="check inline cc-toggle">
+                    <input
+                      type="checkbox"
+                      checked={subs}
+                      onChange={(e) => setSubs(e.target.checked)}
+                    />
+                    Subtitles on video
+                  </label>
+                </section>
+
+                <section className="panel pane transcript-pane">
+                  <h2>Transcript</h2>
+                  <TranscriptView
+                    segments={project.segments}
+                    currentTime={currentTime}
+                    onToggleWord={toggleWord}
+                    onToggleSegment={toggleSegment}
+                    onSeek={seek}
+                    onEditWord={editWord}
+                  />
+                </section>
+              </div>
+
+              {timeline && timeline.clips.length > 0 && (
+                <section className="panel reel-timeline-panel">
+                  <div className="panel-head">
+                    <h2>Reel timeline</h2>
+                    <div className="head-tools">
+                      <label className="check inline">
+                        <input
+                          type="checkbox"
+                          checked={preview}
+                          onChange={(e) => setPreview(e.target.checked)}
+                        />
+                        Preview (skip cuts on playback)
+                      </label>
+                      {totals && (
+                        <span className="stats">
+                          {totals.n_clips} clips · {totals.original_s}s →{' '}
+                          {totals.final_s}s final (−{totals.removed_s}s)
+                        </span>
+                      )}
+                      <a className="export-btn" href={reelFcpxmlUrl(timeline.reel.id)}>
+                        Export FCPXML
+                      </a>
+                    </div>
+                  </div>
+                  <ReelTimeline
+                    clips={timeline.clips}
+                    globalTime={globalTime}
+                    activeId={activeId}
+                    onScrub={onScrub}
+                  />
+                  <p className="hint rt-hint">
+                    Click or drag to scrub across all videos. Edit cuts for the active clip below.
+                  </p>
+                </section>
+              )}
+
+              {transcribed && cutParams && (
+                <section className="panel timeline-area">
+                  <div className="panel-head">
+                    <h2>Active clip · {project.name}</h2>
+                    <div className="head-tools">
+                      <a className="export-btn" href={fcpxmlUrl(project.id)}>
+                        Export clip FCPXML
+                      </a>
+                    </div>
+                  </div>
+                  <CutTrack
+                    audioUrl={audioUrl(project.id)}
+                    cuts={cuts}
+                    wordCuts={wordCuts}
+                    revision={revision}
+                    onCutsChange={onCutsChange}
+                    videoRef={videoRef}
+                  />
+                  <SilenceControls
+                    params={scope === 'all' && reel ? reel.default_cut_params : cutParams}
+                    stats={stats}
+                    busy={cutBusy}
+                    scope={scope}
+                    onScopeChange={setScope}
+                    onChange={applyParams}
+                  />
+                </section>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </main>
   )
 }

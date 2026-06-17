@@ -9,6 +9,7 @@ from .models import (
     CutRegion,
     CutSource,
     Project,
+    Reel,
     SilenceGap,
     SilenceKind,
 )
@@ -174,4 +175,61 @@ def cuts_payload(project: Project) -> dict:
         ],
         "kept": project_kept(project),
         "stats": project_stats(project),
+    }
+
+
+def reel_timeline(reel: Reel, clips: list[Project]) -> dict:
+    """Unified-timeline payload: clips laid end-to-end by *original* duration.
+
+    `clips` must already be in running order. Each clip's `offset` is its global
+    start on the unified axis (cumulative original durations); cuts/word_cuts/kept
+    stay clip-local — the frontend adds `offset` to place them. Totals aggregate
+    across clips, with `final_s` = what the combined export will run.
+    """
+    out_clips: list[dict] = []
+    offset = 0.0
+    total_original = 0.0
+    total_final = 0.0
+    total_cuts = 0
+    total_words = 0
+    for p in clips:
+        dur = p.duration or 0.0
+        kept = project_kept(p)
+        stats = project_stats(p)
+        out_clips.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "duration": dur,
+                "offset": round(offset, 3),
+                "width": p.width,
+                "height": p.height,
+                "fps": p.fps,
+                "status": p.status.value,
+                "language": p.language,
+                "transcribed": bool(p.segments),
+                "cuts": [c.model_dump() for c in p.cuts],
+                "word_cuts": [
+                    {"start": s, "end": e} for s, e in removed_word_spans(p)
+                ],
+                "kept": kept,
+                "stats": stats,
+            }
+        )
+        offset += dur
+        total_original += dur
+        total_final += sum(e - s for s, e in kept)
+        total_cuts += len(p.cuts)
+        total_words += stats["removed_words"]
+    return {
+        "reel": reel.model_dump(),
+        "clips": out_clips,
+        "totals": {
+            "n_clips": len(out_clips),
+            "original_s": round(total_original, 2),
+            "final_s": round(total_final, 2),
+            "removed_s": round(total_original - total_final, 2),
+            "n_cuts": total_cuts,
+            "removed_words": total_words,
+        },
     }

@@ -69,6 +69,7 @@ export interface Project {
   id: string
   name: string
   source_filename: string
+  reel_id: string | null
   duration: number | null
   width: number | null
   height: number | null
@@ -79,6 +80,54 @@ export interface Project {
   segments: Segment[]
   silences: unknown[]
   cut_params: CutParams
+}
+
+export interface ClipSummary {
+  id: string
+  name: string
+  duration: number | null
+  width: number | null
+  height: number | null
+  fps: number | null
+  status: ProjectStatus
+  language: string | null
+  transcribed: boolean
+}
+
+export interface Reel {
+  id: string
+  name: string
+  clip_ids: string[]
+  default_cut_params: CutParams
+}
+
+export interface ReelDetail {
+  reel: Reel
+  clips: ClipSummary[]
+}
+
+export interface TimelineClip extends ClipSummary {
+  duration: number
+  offset: number
+  cuts: CutRegion[]
+  word_cuts: { start: number; end: number }[]
+  kept: [number, number][]
+  stats: CutStats
+}
+
+export interface ReelTotals {
+  n_clips: number
+  original_s: number
+  final_s: number
+  removed_s: number
+  n_cuts: number
+  removed_words: number
+}
+
+export interface ReelTimeline {
+  reel: Reel
+  clips: TimelineClip[]
+  totals: ReelTotals
 }
 
 export interface JobEvent {
@@ -184,6 +233,83 @@ export async function editWordText(
   if (!res.ok) throw new Error(`edit word failed: ${res.status}`)
 }
 
+export async function createReel(name?: string): Promise<ReelDetail> {
+  const res = await fetch('/api/reels', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name ?? null }),
+  })
+  if (!res.ok) throw new Error(`create reel failed: ${res.status}`)
+  return res.json()
+}
+
+export async function listReels(): Promise<Reel[]> {
+  const res = await fetch('/api/reels')
+  if (!res.ok) throw new Error(`list reels failed: ${res.status}`)
+  return res.json()
+}
+
+export async function getReel(id: string): Promise<ReelDetail> {
+  const res = await fetch(`/api/reels/${id}`)
+  if (!res.ok) throw new Error(`get reel failed: ${res.status}`)
+  return res.json()
+}
+
+export async function getReelTimeline(id: string): Promise<ReelTimeline> {
+  const res = await fetch(`/api/reels/${id}/timeline`)
+  if (!res.ok) throw new Error(`get reel timeline failed: ${res.status}`)
+  return res.json()
+}
+
+export async function addReelVideos(id: string, files: File[]): Promise<ReelDetail> {
+  const form = new FormData()
+  for (const f of files) form.append('files', f)
+  const res = await fetch(`/api/reels/${id}/videos`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(`add videos failed: ${res.status} ${await res.text()}`)
+  return res.json()
+}
+
+export async function removeReelVideo(
+  id: string,
+  clipId: string,
+  deleteMedia = false,
+): Promise<ReelDetail> {
+  const res = await fetch(
+    `/api/reels/${id}/videos/${clipId}?delete_media=${deleteMedia}`,
+    { method: 'DELETE' },
+  )
+  if (!res.ok) throw new Error(`remove video failed: ${res.status}`)
+  return res.json()
+}
+
+export async function reorderReel(id: string, clipIds: string[]): Promise<ReelDetail> {
+  const res = await fetch(`/api/reels/${id}/order`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clip_ids: clipIds }),
+  })
+  if (!res.ok) throw new Error(`reorder reel failed: ${res.status}`)
+  return res.json()
+}
+
+export async function updateReelCutParams(
+  id: string,
+  params: CutParams,
+  apply: 'all' | 'reel' = 'all',
+): Promise<ReelDetail> {
+  const res = await fetch(`/api/reels/${id}/cut-params?apply=${apply}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) throw new Error(`update reel params failed: ${res.status}`)
+  return res.json()
+}
+
+export function reelFcpxmlUrl(id: string): string {
+  return `/api/reels/${id}/export/fcpxml`
+}
+
 export function videoUrl(id: string): string {
   return `/api/projects/${id}/video`
 }
@@ -194,10 +320,6 @@ export function audioUrl(id: string): string {
 
 export function fcpxmlUrl(id: string): string {
   return `/api/projects/${id}/export/fcpxml`
-}
-
-export function srtUrl(id: string): string {
-  return `/api/projects/${id}/export/srt`
 }
 
 /** Open a WebSocket to stream job progress. Returns a close function. */

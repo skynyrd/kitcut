@@ -1,9 +1,13 @@
 import type { CutParams, CutStats } from '../api'
 
+export type ApplyScope = 'all' | 'clip'
+
 interface Props {
   params: CutParams
   stats: CutStats | null
   busy?: boolean
+  scope: ApplyScope
+  onScopeChange: (scope: ApplyScope) => void
   onChange: (params: CutParams) => void
 }
 
@@ -41,12 +45,42 @@ function Slider({ label, value, min, max, step, unit, disabled, onChange }: Slid
   )
 }
 
-export function SilenceControls({ params, stats, busy, onChange }: Props) {
+export function SilenceControls({
+  params,
+  stats,
+  busy,
+  scope,
+  onScopeChange,
+  onChange,
+}: Props) {
   const set = (patch: Partial<CutParams>) => onChange({ ...params, ...patch })
   const adaptive = params.mode === 'adaptive'
 
   return (
     <div className="silence-controls">
+      <div className="apply-row">
+        <span>Apply to</span>
+        <div className="seg-toggle">
+          <button
+            className={scope === 'all' ? 'active' : ''}
+            onClick={() => onScopeChange('all')}
+          >
+            All videos
+          </button>
+          <button
+            className={scope === 'clip' ? 'active' : ''}
+            onClick={() => onScopeChange('clip')}
+          >
+            This video
+          </button>
+        </div>
+        <span className="muted apply-hint">
+          {scope === 'all'
+            ? 'edits the reel default and recomputes every video'
+            : 'edits only the active video'}
+        </span>
+      </div>
+
       <div className="mode-row">
         <span>Mode</span>
         <div className="seg-toggle">

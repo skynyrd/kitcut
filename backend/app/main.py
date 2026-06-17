@@ -6,15 +6,23 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    File,
+    HTTPException,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import cuts as cutlib
-from . import fcpxml, ffmpeg_utils, storage, subtitles, vad
+from . import fcpxml, ffmpeg_utils, storage, vad
 from .jobs import jobs
-from .models import CutParams, CutRegion, CutSource, Project, ProjectStatus
+from .models import CutParams, CutRegion, CutSource, Project, ProjectStatus, Reel
 from .transcribe import DEFAULT_MODEL, transcribe
 
 app = FastAPI(title="kitcut", version="0.1.0")
@@ -59,8 +67,7 @@ def list_projects() -> list[Project]:
     return storage.list_projects()
 
 
-@app.post("/api/projects")
-async def create_project(file: UploadFile) -> Project:
+def _create_clip(file: UploadFile, reel_id: str | None = None) -> Project:
     project_id = uuid.uuid4().hex[:12]
     storage.ensure_project_dir(project_id)
 
@@ -78,6 +85,7 @@ async def create_project(file: UploadFile) -> Project:
         id=project_id,
         name=file.filename or project_id,
         source_filename=dst.name,
+        reel_id=reel_id,
         duration=meta["duration"],
         width=meta["width"],
         height=meta["height"],
@@ -88,11 +96,138 @@ async def create_project(file: UploadFile) -> Project:
     return project
 
 
+@app.post("/api/projects")
+async def create_project(file: UploadFile) -> Project:
+    return _create_clip(file)
+
+
 def _require_project(project_id: str) -> Project:
     project = storage.load_project(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
     return project
+
+
+# ---- Reels: ordered collections of clips edited & exported together ----
+
+
+def _require_reel(reel_id: str) -> Reel:
+    reel = storage.load_reel(reel_id)
+    if reel is None:
+        raise HTTPException(status_code=404, detail="reel not found")
+    return reel
+
+
+def _clip_summary(p: Project) -> dict:
+    return {
+        "id": p.id,
+        "name": p.name,
+        "duration": p.duration,
+        "width": p.width,
+        "height": p.height,
+        "fps": p.fps,
+        "status": p.status.value,
+        "language": p.language,
+        "transcribed": bool(p.segments),
+    }
+
+
+def _reel_detail(reel: Reel) -> dict:
+    """Reel plus its clips' summaries, in running order (missing clips skipped)."""
+    clips = [
+        _clip_summary(p)
+        for cid in reel.clip_ids
+        if (p := storage.load_project(cid)) is not None
+    ]
+    return {"reel": reel.model_dump(), "clips": clips}
+
+
+class CreateReel(BaseModel):
+    name: str | None = None
+
+
+class ReelOrder(BaseModel):
+    clip_ids: list[str]
+
+
+@app.post("/api/reels")
+def create_reel(body: CreateReel | None = None) -> dict:
+    reel = Reel(
+        id="reel_" + uuid.uuid4().hex[:10],
+        name=(body.name if body else None) or "Untitled reel",
+    )
+    storage.save_reel(reel)
+    return _reel_detail(reel)
+
+
+@app.get("/api/reels")
+def list_reels() -> list[Reel]:
+    return storage.list_reels()
+
+
+@app.get("/api/reels/{reel_id}")
+def get_reel(reel_id: str) -> dict:
+    return _reel_detail(_require_reel(reel_id))
+
+
+@app.get("/api/reels/{reel_id}/timeline")
+def get_reel_timeline(reel_id: str) -> dict:
+    reel = _require_reel(reel_id)
+    clips = [
+        p for cid in reel.clip_ids if (p := storage.load_project(cid)) is not None
+    ]
+    return cutlib.reel_timeline(reel, clips)
+
+
+@app.post("/api/reels/{reel_id}/videos")
+async def add_reel_videos(reel_id: str, files: list[UploadFile] = File(...)) -> dict:
+    reel = _require_reel(reel_id)
+    for f in files:
+        clip = _create_clip(f, reel_id=reel_id)
+        reel.clip_ids.append(clip.id)
+    storage.save_reel(reel)
+    return _reel_detail(reel)
+
+
+@app.put("/api/reels/{reel_id}/order")
+def reorder_reel(reel_id: str, body: ReelOrder) -> dict:
+    reel = _require_reel(reel_id)
+    if set(body.clip_ids) != set(reel.clip_ids):
+        raise HTTPException(
+            status_code=400, detail="order must be a permutation of the reel's clips"
+        )
+    reel.clip_ids = body.clip_ids
+    storage.save_reel(reel)
+    return _reel_detail(reel)
+
+
+@app.delete("/api/reels/{reel_id}/videos/{clip_id}")
+def remove_reel_video(reel_id: str, clip_id: str, delete_media: bool = False) -> dict:
+    reel = _require_reel(reel_id)
+    if clip_id not in reel.clip_ids:
+        raise HTTPException(status_code=404, detail="clip not in reel")
+    reel.clip_ids = [c for c in reel.clip_ids if c != clip_id]
+    storage.save_reel(reel)
+    if delete_media:
+        storage.delete_project(clip_id)
+    return _reel_detail(reel)
+
+
+@app.put("/api/reels/{reel_id}/cut-params")
+def update_reel_cut_params(reel_id: str, params: CutParams, apply: str = "all") -> dict:
+    """Set the reel default. With apply=all, push it to every clip and recompute.
+
+    Recompute runs VAD per clip synchronously (matches the per-clip endpoint).
+    """
+    reel = _require_reel(reel_id)
+    reel.default_cut_params = params
+    storage.save_reel(reel)
+    if apply == "all":
+        for cid in reel.clip_ids:
+            clip = storage.load_project(cid)
+            if clip is not None:
+                _apply_cut_params(clip, params)
+    return _reel_detail(reel)
 
 
 @app.get("/api/projects/{project_id}")
@@ -133,13 +268,14 @@ def get_cuts(project_id: str) -> dict:
     return cutlib.cuts_payload(_require_project(project_id))
 
 
-@app.put("/api/projects/{project_id}/cut-params")
-def update_cut_params(project_id: str, params: CutParams) -> dict:
-    project = _require_project(project_id)
-    project.cut_params = params
-    audio = _ensure_audio(project_id)
+def _apply_cut_params(project: Project, params: CutParams) -> None:
+    """Set cut params on a clip and recompute its auto-cuts, keeping manual cuts.
 
-    # VAD speech is the keep-signal; only re-run when the threshold changes.
+    VAD speech is the keep-signal; only re-run when the threshold changes.
+    """
+    project.cut_params = params
+    audio = _ensure_audio(project.id)
+
     if not project.speech_regions or project.speech_threshold != params.vad_threshold:
         project.speech_regions = vad.detect_speech(audio, params.vad_threshold)
         project.speech_threshold = params.vad_threshold
@@ -150,6 +286,12 @@ def update_cut_params(project_id: str, params: CutParams) -> dict:
     project.silences = gaps
     project.cuts = auto_cuts + manual
     storage.save_project(project)
+
+
+@app.put("/api/projects/{project_id}/cut-params")
+def update_cut_params(project_id: str, params: CutParams) -> dict:
+    project = _require_project(project_id)
+    _apply_cut_params(project, params)
     return cutlib.cuts_payload(project)
 
 
@@ -161,6 +303,10 @@ def replace_cuts(project_id: str, regions: list[CutRegion]) -> dict:
     return cutlib.cuts_payload(project)
 
 
+def _safe_name(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name) or "kitcut"
+
+
 @app.get("/api/projects/{project_id}/export/fcpxml")
 def export_fcpxml(project_id: str) -> Response:
     project = _require_project(project_id)
@@ -168,23 +314,32 @@ def export_fcpxml(project_id: str) -> Response:
     if src is None:
         raise HTTPException(status_code=404, detail="source not found")
     xml = fcpxml.build_fcpxml(project, src)
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project.name) or "kitcut"
     return Response(
         content=xml,
         media_type="application/xml",
-        headers={"Content-Disposition": f'attachment; filename="{safe}.fcpxml"'},
+        headers={"Content-Disposition": f'attachment; filename="{_safe_name(project.name)}.fcpxml"'},
     )
 
 
-@app.get("/api/projects/{project_id}/export/srt")
-def export_srt(project_id: str) -> Response:
-    project = _require_project(project_id)
-    srt = subtitles.build_srt(project)
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project.name) or "kitcut"
+@app.get("/api/reels/{reel_id}/export/fcpxml")
+def export_reel_fcpxml(reel_id: str) -> Response:
+    reel = _require_reel(reel_id)
+    clips: list[tuple[Project, Path]] = []
+    for cid in reel.clip_ids:
+        p = storage.load_project(cid)
+        if p is None:
+            continue
+        src = storage.find_source(cid)
+        if src is None:
+            raise HTTPException(status_code=404, detail=f"source missing for clip {cid}")
+        clips.append((p, src))
+    if not clips:
+        raise HTTPException(status_code=400, detail="reel has no videos to export")
+    xml = fcpxml.build_reel_fcpxml(reel, clips)
     return Response(
-        content=srt,
-        media_type="application/x-subrip",
-        headers={"Content-Disposition": f'attachment; filename="{safe}.srt"'},
+        content=xml,
+        media_type="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="{_safe_name(reel.name)}.fcpxml"'},
     )
 
 

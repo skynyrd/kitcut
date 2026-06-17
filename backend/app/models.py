@@ -84,6 +84,7 @@ class Project(BaseModel):
     id: str
     name: str
     source_filename: str
+    reel_id: str | None = None
     duration: float | None = None
     width: int | None = None
     height: int | None = None
@@ -100,3 +101,17 @@ class Project(BaseModel):
     speech_threshold: float | None = None  # vad_threshold used for speech_regions
     cuts: list[CutRegion] = Field(default_factory=list)
     cut_params: CutParams = Field(default_factory=CutParams)
+
+
+class Reel(BaseModel):
+    """An ordered collection of clips (Projects) edited and exported together.
+
+    `clip_ids` is the running order — it drives both the unified timeline and
+    the combined FCPXML spine. `default_cut_params` is the reel-wide setting
+    applied when the user edits with "apply to all videos".
+    """
+
+    id: str
+    name: str
+    clip_ids: list[str] = Field(default_factory=list)
+    default_cut_params: CutParams = Field(default_factory=CutParams)

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
-from .models import Project
+from .models import Project, Reel
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 MEDIA_DIR = BASE_DIR / "media"
 MODEL_DIR = BASE_DIR / "models"
+# Reels live under the (gitignored) media tree; clips keep their own dirs.
+REELS_DIR = MEDIA_DIR / "reels"
 
 
 def project_dir(project_id: str) -> Path:
@@ -40,6 +43,12 @@ def ensure_project_dir(project_id: str) -> Path:
     return d
 
 
+def delete_project(project_id: str) -> None:
+    d = project_dir(project_id)
+    if d.exists():
+        shutil.rmtree(d)
+
+
 def save_project(project: Project) -> None:
     ensure_project_dir(project.id)
     project_json_path(project.id).write_text(project.model_dump_json(indent=2))
@@ -60,8 +69,38 @@ def list_projects() -> list[Project]:
         return []
     projects: list[Project] = []
     for child in MEDIA_DIR.iterdir():
-        if child.is_dir():
+        if child.is_dir() and child.name != REELS_DIR.name:
             p = load_project(child.name)
             if p is not None:
                 projects.append(p)
     return projects
+
+
+def reel_json_path(reel_id: str) -> Path:
+    return REELS_DIR / f"{reel_id}.json"
+
+
+def save_reel(reel: Reel) -> None:
+    REELS_DIR.mkdir(parents=True, exist_ok=True)
+    reel_json_path(reel.id).write_text(reel.model_dump_json(indent=2))
+
+
+def load_reel(reel_id: str) -> Reel | None:
+    path = reel_json_path(reel_id)
+    if not path.exists():
+        return None
+    try:
+        return Reel.model_validate_json(path.read_text())
+    except Exception:
+        return None  # stale/incompatible schema — treat as missing
+
+
+def list_reels() -> list[Reel]:
+    if not REELS_DIR.exists():
+        return []
+    reels: list[Reel] = []
+    for child in REELS_DIR.glob("*.json"):
+        reel = load_reel(child.stem)
+        if reel is not None:
+            reels.append(reel)
+    return reels
