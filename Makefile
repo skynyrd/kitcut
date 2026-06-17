@@ -3,7 +3,7 @@
 PIP  := backend/.venv/bin/pip
 PORT ?= 8000
 
-.PHONY: help setup setup-backend setup-frontend backend frontend dev clean
+.PHONY: help setup setup-backend setup-frontend backend frontend dev clean kill-ports
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -31,6 +31,11 @@ dev: ## Run backend + frontend together (Ctrl-C stops both)
 	( cd backend && ./.venv/bin/uvicorn app.main:app --reload --reload-dir app --port $(PORT) ) & \
 	( cd frontend && npm run dev ) & \
 	wait
+
+kill-ports: ## Kill processes on backend ($(PORT)) and frontend (5173) ports
+	@lsof -ti:$(PORT) | xargs -r kill -9 2>/dev/null || true
+	@lsof -ti:5173 | xargs -r kill -9 2>/dev/null || true
+	@echo "Killed processes on ports $(PORT) and 5173"
 
 clean: ## Remove build artifacts, venv, node_modules
 	rm -rf backend/.venv frontend/node_modules frontend/dist
