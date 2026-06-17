@@ -70,6 +70,7 @@ export function ReelWaveTimeline({
   const [pxPerSec, setPxPerSec] = useState(0)
   const [pendingMsg, setPendingMsg] = useState<string | null>(null)
   const [menu, setMenu] = useState<MenuState | null>(null)
+  const [viewportTime, setViewportTime] = useState({ start: 0, end: 0 })
 
   const clipsRef = useRef(clips)
   clipsRef.current = clips
@@ -143,6 +144,15 @@ export function ReelWaveTimeline({
     reg.remove()
     if (selectedRef.current === regionId) selectCut(null)
     onCutsRef.current(clipId, collect(clipId))
+  }
+
+  // Viewport-based rendering: only show regions in view + buffer
+  function isRegionVisible(start: number, end: number): boolean {
+    const BUFFER_TIME = 10; // seconds of buffer on each side
+    return (
+      end > viewportTime.start - BUFFER_TIME &&
+      start < viewportTime.end + BUFFER_TIME
+    );
   }
 
   // create wavesurfer; recreate only when the reel audio changes
@@ -318,33 +328,43 @@ export function ReelWaveTimeline({
         if (lab.element) lab.element.style.pointerEvents = 'none'
       }
 
-      // Only show word regions when zoomed in
+      // Only show word regions when zoomed in AND visible in viewport
       if (showDetails) {
         c.word_cuts.forEach((w, i) => {
-          const wr = regions.addRegion({
-            id: `${c.id}::word-${i}`,
-            start: c.offset + w.start,
-            end: c.offset + w.end,
-            color: WORD_COLOR,
-            drag: false,
-            resize: false,
-          })
-          if (wr.element) wr.element.style.pointerEvents = 'none'
+          const regionStart = c.offset + w.start
+          const regionEnd = c.offset + w.end
+          // Phase 8.3: Viewport-based rendering - skip invisible regions
+          if (isRegionVisible(regionStart, regionEnd)) {
+            const wr = regions.addRegion({
+              id: `${c.id}::word-${i}`,
+              start: regionStart,
+              end: regionEnd,
+              color: WORD_COLOR,
+              drag: false,
+              resize: false,
+            })
+            if (wr.element) wr.element.style.pointerEvents = 'none'
+          }
         })
       }
       for (const cut of c.cuts) {
-        regions.addRegion({
-          id: `${c.id}::${cut.id}`,
-          start: c.offset + cut.start,
-          end: c.offset + cut.end,
-          color: cut.source === 'manual' ? MANUAL_COLOR : CUT_COLORS[cut.kind],
-          drag: true,
-          resize: true,
-        })
+        const cutStart = c.offset + cut.start
+        const cutEnd = c.offset + cut.end
+        // Phase 8.3: Viewport-based rendering - skip invisible cuts
+        if (isRegionVisible(cutStart, cutEnd)) {
+          regions.addRegion({
+            id: `${c.id}::${cut.id}`,
+            start: cutStart,
+            end: cutEnd,
+            color: cut.source === 'manual' ? MANUAL_COLOR : CUT_COLORS[cut.kind],
+            drag: true,
+            resize: true,
+          })
+        }
       }
     })
     programmatic.current = false
-  }, [ready, clips, activeId, pxPerSec])
+  }, [ready, clips, activeId, pxPerSec, viewportTime])
 
   // smooth playhead from the active video (rAF); offset read live via refs
   useEffect(() => {
@@ -480,6 +500,34 @@ export function ReelWaveTimeline({
     window.addEventListener('click', close)
     return () => window.removeEventListener('click', close)
   }, [menu])
+
+  // Track viewport scroll position for viewport-based rendering
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el || !ready) return
+
+    const updateViewport = () => {
+      const ws = wsRef.current
+      if (!ws) return
+      const duration = ws.getDuration() || 0
+      if (duration === 0) return
+
+      // Calculate visible time range based on scroll position
+      const scrollLeft = el.scrollLeft || 0
+      const containerWidth = el.clientWidth
+      const startTime = (scrollLeft / pxPerSec) * (duration / (duration || 1))
+      const endTime = ((scrollLeft + containerWidth) / pxPerSec) * (duration / (duration || 1))
+
+      setViewportTime({ start: startTime, end: endTime })
+    }
+
+    // Update on scroll
+    el.addEventListener('scroll', updateViewport)
+    // Initial update
+    updateViewport()
+
+    return () => el.removeEventListener('scroll', updateViewport)
+  }, [ready, pxPerSec])
 
   function zoomTo(px: number) {
     const ws = wsRef.current
