@@ -1,28 +1,39 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ClipSummary } from '../api'
 
 interface Props {
   clips: ClipSummary[]
   activeId: string | null
   busyIds: string[]
+  progressMsg: string
   onSelect: (id: string) => void
   onReorder: (clipIds: string[]) => void
   onRemove: (id: string) => void
   onAddVideos: (files: File[]) => void
   onTranscribeAll: () => void
+  onStopTranscribe: () => void
+}
+
+interface MenuState {
+  x: number
+  y: number
+  clipId: string
 }
 
 export function ReelSidebar({
   clips,
   activeId,
   busyIds,
+  progressMsg,
   onSelect,
   onReorder,
   onRemove,
   onAddVideos,
   onTranscribeAll,
+  onStopTranscribe,
 }: Props) {
   const [dragId, setDragId] = useState<string | null>(null)
+  const [menu, setMenu] = useState<MenuState | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   function handleDrop(targetId: string) {
@@ -37,6 +48,15 @@ export function ReelSidebar({
   }
 
   const allTranscribed = clips.length > 0 && clips.every((c) => c.transcribed)
+  const transcribedCount = clips.filter((c) => c.transcribed).length
+  const isTranscribingAny = busyIds.length > 0
+
+  useEffect(() => {
+    if (!menu) return
+    const close = () => setMenu(null)
+    window.addEventListener('click', close)
+    return () => window.removeEventListener('click', close)
+  }, [menu])
 
   function statusText(c: ClipSummary): string {
     if (busyIds.includes(c.id)) return 'transcribing…'
@@ -65,10 +85,15 @@ export function ReelSidebar({
             onDragOver={(e) => e.preventDefault()}
             onDrop={() => handleDrop(c.id)}
             onClick={() => onSelect(c.id)}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setMenu({ x: e.clientX, y: e.clientY, clipId: c.id })
+            }}
           >
             <span className="clip-grip" title="drag to reorder">
               ⠿
             </span>
+            {busyIds.includes(c.id) && <span className="loading-dot" style={{ color: '#5dff8f' }}>●</span>}
             <span className="clip-index">{i + 1}</span>
             <span className="clip-main">
               <span className="clip-name" title={c.name}>
@@ -93,6 +118,19 @@ export function ReelSidebar({
         {!clips.length && <li className="muted clip-empty">No videos yet.</li>}
       </ol>
 
+      {menu && (
+        <div className="rwt-menu" style={{ left: menu.x, top: menu.y }}>
+          <button
+            onClick={() => {
+              onRemove(menu.clipId)
+              setMenu(null)
+            }}
+          >
+            Delete clip
+          </button>
+        </div>
+      )}
+
       <div className="reel-actions">
         <input
           ref={fileRef}
@@ -106,10 +144,39 @@ export function ReelSidebar({
             e.target.value = ''
           }}
         />
-        <button onClick={() => fileRef.current?.click()}>+ Add videos</button>
-        <button onClick={onTranscribeAll} disabled={allTranscribed || !clips.length}>
-          Transcribe all
+        <button onClick={() => fileRef.current?.click()} disabled={!!progressMsg || isTranscribingAny}>
+          + Add videos
         </button>
+        {!isTranscribingAny && (
+          <button onClick={onTranscribeAll} disabled={allTranscribed || !clips.length || !!progressMsg}>
+            Transcribe all
+          </button>
+        )}
+        {isTranscribingAny && (
+          <button onClick={onStopTranscribe} style={{ backgroundColor: '#d32f2f' }}>
+            Stop transcribing
+          </button>
+        )}
+        {!allTranscribed && clips.length > 0 && !isTranscribingAny && (
+          <span className="muted" style={{ fontSize: '0.85em' }}>
+            (uses default model: large-v3)
+          </span>
+        )}
+        {isTranscribingAny && (
+          <div className="progress-indicator">
+            <span className="loading-dot">●</span>
+            <span className="muted">
+              Transcribing {transcribedCount}/{clips.length}
+              {busyIds.length > 0 && ` · ${busyIds.length} active`}
+            </span>
+          </div>
+        )}
+        {progressMsg && !isTranscribingAny && (
+          <div className="progress-indicator">
+            <span className="loading-dot">●</span>
+            <span className="muted">{progressMsg}</span>
+          </div>
+        )}
       </div>
     </aside>
   )

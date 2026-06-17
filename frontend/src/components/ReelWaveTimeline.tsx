@@ -19,7 +19,8 @@ const SELECT_OUTLINE = '2px solid #5dff8f'
 interface MenuState {
   x: number
   y: number
-  regionId: string
+  regionId: string | null
+  clipId: string | null
 }
 
 interface Props {
@@ -30,6 +31,7 @@ interface Props {
   audioRev: number
   onScrub: (globalTime: number) => void
   onClipCutsChange: (clipId: string, cuts: CutRegion[]) => void
+  onRemoveClip: (clipId: string) => void
   videoRef: RefObject<HTMLVideoElement | null>
 }
 
@@ -56,6 +58,7 @@ export function ReelWaveTimeline({
   audioRev,
   onScrub,
   onClipCutsChange,
+  onRemoveClip,
   videoRef,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -76,6 +79,8 @@ export function ReelWaveTimeline({
   onScrubRef.current = onScrub
   const onCutsRef = useRef(onClipCutsChange)
   onCutsRef.current = onClipCutsChange
+  const onRemoveClipRef = useRef(onRemoveClip)
+  onRemoveClipRef.current = onRemoveClip
   const playingRef = useRef(false)
   const programmatic = useRef(false)
   const manualIds = useRef<Set<string>>(new Set())
@@ -224,20 +229,40 @@ export function ReelWaveTimeline({
       deleteRegion(r.id)
     })
 
-    // right-click a cut → context menu. The waveform lives in a shadow root, so
-    // e.target is retargeted to the host; use composedPath() to see the real
-    // region element. (bands/words are pointer-events:none and won't be hit.)
+    // right-click a cut or clip band → context menu
     const onCtx = (e: MouseEvent) => {
       const path = e.composedPath()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const reg = (regions.getRegions() ?? []).find(
+      const cutReg = (regions.getRegions() ?? []).find(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (r: any) => isCut(r.id) && r.element && path.includes(r.element),
       )
-      if (!reg) return
-      e.preventDefault()
-      selectCut(reg.id)
-      setMenu({ x: e.clientX, y: e.clientY, regionId: reg.id })
+      if (cutReg) {
+        e.preventDefault()
+        selectCut(cutReg.id)
+        const clipId = cutReg.id.split('::')[0]
+        setMenu({ x: e.clientX, y: e.clientY, regionId: cutReg.id, clipId })
+        return
+      }
+
+      // if no cut hit, find which clip is at the cursor position by time
+      // get the waveform container and calculate time from click position
+      if (!el.contains(e.target as Node)) return
+      const rect = el.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const time = (x / rect.width) * (ws.getDuration() || 0)
+
+      // find which clip this time falls into
+      for (const clip of clipsRef.current) {
+        const clipStart = clip.offset
+        const clipEnd = clip.offset + (clip.duration || 0)
+        if (time >= clipStart && time < clipEnd) {
+          e.preventDefault()
+          selectCut(null)
+          setMenu({ x: e.clientX, y: e.clientY, regionId: null, clipId: clip.id })
+          return
+        }
+      }
     }
     el.addEventListener('contextmenu', onCtx)
 
@@ -474,14 +499,27 @@ export function ReelWaveTimeline({
       <div ref={containerRef} className="waveform" />
       {menu && (
         <div className="rwt-menu" style={{ left: menu.x, top: menu.y }}>
-          <button
-            onClick={() => {
-              deleteRegion(menu.regionId)
-              setMenu(null)
-            }}
-          >
-            Delete cut
-          </button>
+          {menu.regionId && (
+            <button
+              onClick={() => {
+                deleteRegion(menu.regionId)
+                setMenu(null)
+              }}
+            >
+              Delete cut
+            </button>
+          )}
+          {menu.clipId && (
+            <button
+              onClick={() => {
+                const clipId = menu.clipId!
+                setMenu(null)
+                void onRemoveClipRef.current(clipId)
+              }}
+            >
+              Delete clip
+            </button>
+          )}
         </div>
       )}
       <p className="hint">

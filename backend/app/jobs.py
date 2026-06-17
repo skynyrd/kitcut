@@ -24,6 +24,7 @@ class Job:
     result: Any = None
     error: str | None = None
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    cancel_requested: bool = False
 
     def snapshot(self) -> dict:
         return {
@@ -55,6 +56,14 @@ class JobManager:
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
+    def cancel(self, job_id: str) -> bool:
+        """Request cancellation of a job. Returns True if job was found."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        job.cancel_requested = True
+        return True
+
     def _emit(self, job: Job) -> None:
         event = job.snapshot()
         if self._loop is not None:
@@ -62,8 +71,8 @@ class JobManager:
         else:
             job.queue.put_nowait(event)
 
-    async def run(self, job: Job, work: Callable[[ProgressFn], Any]) -> None:
-        """Run a blocking `work(progress)` in a thread, streaming progress."""
+    async def run(self, job: Job, work: Callable[[ProgressFn, Callable[[], bool]], Any]) -> None:
+        """Run a blocking `work(progress, is_cancelled)` in a thread, streaming progress."""
         job.state = JobState.running
         self._emit(job)
 
@@ -72,8 +81,11 @@ class JobManager:
             job.message = message
             self._emit(job)
 
+        def is_cancelled() -> bool:
+            return job.cancel_requested
+
         try:
-            job.result = await asyncio.to_thread(work, progress)
+            job.result = await asyncio.to_thread(work, progress, is_cancelled)
             job.state = JobState.done
             job.progress = 1.0
         except Exception as exc:  # noqa: BLE001 - surface any failure to the client

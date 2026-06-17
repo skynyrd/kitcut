@@ -10,8 +10,11 @@ backend/.venv/
 frontend/node_modules/
 frontend/dist/
 
-# Media working files (uploads, extracted audio, renders)
+# Media working files (extracted audio, renders)
 media/
+
+# Uploaded videos (symlinked from media)
+uploads/
 
 # Whisper models
 models/

@@ -7,6 +7,7 @@ import {
 } from 'react'
 import {
   addReelVideos,
+  cancelJob,
   createReel,
   editWordText,
   fcpxmlUrl,
@@ -19,6 +20,7 @@ import {
   removeReelVideo,
   reorderReel,
   replaceCuts,
+  resetTranscription,
   setRemovedWords,
   startTranscribe,
   updateCutParams,
@@ -58,7 +60,7 @@ function App() {
 
   // active-clip editing state
   const [project, setProject] = useState<Project | null>(null)
-  const [model, setModel] = useState('small')
+  const [model, setModel] = useState('large-v3')
   const [language, setLanguage] = useState('auto')
   const [progress, setProgress] = useState(0)
   const [progressMsg, setProgressMsg] = useState('')
@@ -80,6 +82,8 @@ function App() {
   const removesRef = useRef<[number, number][]>([])
   const previewRef = useRef(preview)
   previewRef.current = preview
+  const transcribeAllAbortRef = useRef(false)
+  const currentJobIdRef = useRef<string | null>(null)
 
   // refs to read latest values inside async job/video callbacks
   const reelRef = useRef(reel)
@@ -275,6 +279,7 @@ function App() {
     }
   }
 
+
   async function onRemoveClip(id: string) {
     if (!reelRef.current) return
     try {
@@ -321,6 +326,7 @@ function App() {
         languageRef.current === 'auto' ? null : languageRef.current,
       )
         .then((jobId) => {
+          currentJobIdRef.current = jobId
           setError(null)
           setBusyIds((s) => (s.includes(id) ? s : [...s, id]))
           const close = watchJob(jobId, async (ev) => {
@@ -342,7 +348,6 @@ function App() {
                   setClips(detail.clips)
                 }
                 await refreshTimeline()
-                setAudioRev((n) => n + 1)
               } catch {
                 /* ignore refresh failure */
               }
@@ -351,7 +356,16 @@ function App() {
               close()
               resolve()
             } else if (ev.state === 'error') {
-              setError(ev.error || 'transcription failed')
+              // If the job was cancelled, clean up the artifacts
+              if (transcribeAllAbortRef.current) {
+                try {
+                  await resetTranscription(id)
+                } catch {
+                  /* best-effort cleanup */
+                }
+              } else {
+                setError(ev.error || 'transcription failed')
+              }
               setBusyIds((s) => s.filter((x) => x !== id))
               close()
               resolve()
@@ -370,11 +384,25 @@ function App() {
   }
 
   async function onTranscribeAll() {
+    transcribeAllAbortRef.current = false
     const targets = clips
       .filter((c) => !c.transcribed && !busyIds.includes(c.id))
       .map((c) => c.id)
     for (const id of targets) {
+      if (transcribeAllAbortRef.current) break
       await transcribeClip(id) // sequential: bounds Whisper memory
+    }
+  }
+
+  async function onStopTranscribe() {
+    transcribeAllAbortRef.current = true
+    if (currentJobIdRef.current) {
+      try {
+        await cancelJob(currentJobIdRef.current)
+        currentJobIdRef.current = null
+      } catch (e) {
+        setError(String(e))
+      }
     }
   }
 
@@ -565,11 +593,13 @@ function App() {
           clips={clips}
           activeId={activeId}
           busyIds={busyIds}
+          progressMsg={progressMsg}
           onSelect={(id) => gotoClip(id, 0)}
           onReorder={onReorder}
           onRemove={onRemoveClip}
           onAddVideos={onAddVideos}
           onTranscribeAll={onTranscribeAll}
+          onStopTranscribe={onStopTranscribe}
         />
 
         <div className="editor">
@@ -611,7 +641,7 @@ function App() {
                 {activeBusy && (
                   <div className="progress">
                     <div className="bar" style={{ width: `${Math.round(progress * 100)}%` }} />
-                    <span className="progress-label">{progressMsg}</span>
+                    <span className="progress-label">{progressMsg} · {model}</span>
                   </div>
                 )}
                 <div className="meta">
@@ -696,6 +726,7 @@ function App() {
                     audioRev={audioRev}
                     onScrub={onScrub}
                     onClipCutsChange={onClipCutsChange}
+                    onRemoveClip={onRemoveClip}
                     videoRef={videoRef}
                   />
                   {transcribed && cutParams && (

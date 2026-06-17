@@ -8,6 +8,8 @@ from .models import Project, Reel
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 MEDIA_DIR = BASE_DIR / "media"
 MODEL_DIR = BASE_DIR / "models"
+# Centralized uploads directory (outside codebase, outside media)
+UPLOADS_DIR = BASE_DIR / "uploads"
 # Reels live under the (gitignored) media tree; clips keep their own dirs.
 REELS_DIR = MEDIA_DIR / "reels"
 
@@ -41,6 +43,17 @@ def ensure_project_dir(project_id: str) -> Path:
     d = project_dir(project_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def ensure_uploads_dir() -> Path:
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    return UPLOADS_DIR
+
+
+def uploads_path(filename: str) -> Path:
+    """Get a unique path in the uploads directory."""
+    ensure_uploads_dir()
+    return UPLOADS_DIR / filename
 
 
 def delete_project(project_id: str) -> None:

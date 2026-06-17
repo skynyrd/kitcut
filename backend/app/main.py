@@ -73,18 +73,63 @@ def _create_clip(file: UploadFile, reel_id: str | None = None) -> Project:
     storage.ensure_project_dir(project_id)
 
     suffix = Path(file.filename or "").suffix or ".mp4"
-    dst = storage.source_path(project_id, suffix)
-    with dst.open("wb") as out:
+
+    # Store uploaded file in uploads directory, symlink from media directory (saves space)
+    upload_filename = f"{project_id}{suffix}"
+    upload_path = storage.uploads_path(upload_filename)
+    with upload_path.open("wb") as out:
         shutil.copyfileobj(file.file, out)
 
+    # Create symlink from media/projectid/source.mp4 to uploads/projectid.mp4
+    dst = storage.source_path(project_id, suffix)
+    dst.symlink_to(upload_path.resolve())
+
     try:
-        meta = ffmpeg_utils.probe(dst)
+        meta = ffmpeg_utils.probe(str(dst))
     except ffmpeg_utils.FFmpegError as exc:
+        upload_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"could not read media: {exc}")
 
     project = Project(
         id=project_id,
         name=file.filename or project_id,
+        source_filename=dst.name,
+        reel_id=reel_id,
+        duration=meta["duration"],
+        width=meta["width"],
+        height=meta["height"],
+        fps=meta["fps"],
+        audio_rate=meta.get("audio_rate"),
+    )
+    storage.save_project(project)
+    return project
+
+
+def _create_clip_from_path(file_path: str, reel_id: str | None = None) -> Project:
+    """Create a clip from an existing file path using a symlink (no copying)."""
+    src = Path(file_path).resolve()
+    if not src.exists():
+        raise HTTPException(status_code=400, detail=f"file not found: {file_path}")
+    if not src.is_file():
+        raise HTTPException(status_code=400, detail=f"not a file: {file_path}")
+
+    project_id = uuid.uuid4().hex[:12]
+    storage.ensure_project_dir(project_id)
+
+    suffix = src.suffix or ".mp4"
+    dst = storage.source_path(project_id, suffix)
+
+    try:
+        meta = ffmpeg_utils.probe(str(src))
+    except ffmpeg_utils.FFmpegError as exc:
+        raise HTTPException(status_code=400, detail=f"could not read media: {exc}")
+
+    # Create symlink instead of copying
+    dst.symlink_to(src)
+
+    project = Project(
+        id=project_id,
+        name=src.name,
         source_filename=dst.name,
         reel_id=reel_id,
         duration=meta["duration"],
@@ -149,6 +194,10 @@ class CreateReel(BaseModel):
 
 class ReelOrder(BaseModel):
     clip_ids: list[str]
+
+
+class AddVideoPaths(BaseModel):
+    paths: list[str]
 
 
 @app.post("/api/reels")
@@ -224,6 +273,17 @@ async def add_reel_videos(reel_id: str, files: list[UploadFile] = File(...)) -> 
     reel = _require_reel(reel_id)
     for f in files:
         clip = _create_clip(f, reel_id=reel_id)
+        reel.clip_ids.append(clip.id)
+    storage.save_reel(reel)
+    return _reel_detail(reel)
+
+
+@app.post("/api/reels/{reel_id}/videos/from-paths")
+def add_reel_videos_from_paths(reel_id: str, body: AddVideoPaths) -> dict:
+    """Add videos from existing file paths (creates symlinks, no copying)."""
+    reel = _require_reel(reel_id)
+    for path in body.paths:
+        clip = _create_clip_from_path(path, reel_id=reel_id)
         reel.clip_ids.append(clip.id)
     storage.save_reel(reel)
     return _reel_detail(reel)
@@ -422,17 +482,26 @@ class TranscribeRequest(BaseModel):
 
 
 def _transcribe_work(project_id: str, model_size: str, language: str | None):
-    def work(progress):
+    def work(progress, is_cancelled):
+        if is_cancelled():
+            raise RuntimeError("transcription cancelled")
+
         project = _require_project(project_id)
         project.status = ProjectStatus.extracting
         project.error = None
         storage.save_project(project)
         try:
+            if is_cancelled():
+                raise RuntimeError("transcription cancelled")
+
             progress(0.02, "extracting audio")
             src = storage.find_source(project_id)
             if src is None:
                 raise FileNotFoundError("source video missing")
             ffmpeg_utils.extract_audio(src, storage.audio_path(project_id))
+
+            if is_cancelled():
+                raise RuntimeError("transcription cancelled")
 
             project.status = ProjectStatus.transcribing
             storage.save_project(project)
@@ -443,6 +512,10 @@ def _transcribe_work(project_id: str, model_size: str, language: str | None):
                 language=language,
                 progress=progress,
             )
+
+            if is_cancelled():
+                raise RuntimeError("transcription cancelled")
+
             project.segments = result["segments"]
             project.language = result["language"]
             project.aligned = result.get("aligned", False)
@@ -475,6 +548,37 @@ async def start_transcribe(project_id: str, req: TranscribeRequest) -> dict:
         jobs.run(job, _transcribe_work(project_id, req.model_size, req.language))
     )
     return {"job_id": job.id}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    """Cancel a job."""
+    if not jobs.cancel(job_id):
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"cancelled": True}
+
+
+@app.post("/api/projects/{project_id}/reset-transcription")
+def reset_transcription(project_id: str) -> Project:
+    """Reset transcription artifacts but keep the source video file."""
+    project = _require_project(project_id)
+    project_path = storage.project_dir(project_id)
+
+    if project_path.exists():
+        # Delete extracted audio and other non-source artifacts
+        for f in project_path.glob("*"):
+            if not f.name.startswith("source"):
+                if f.is_file():
+                    f.unlink()
+                elif f.is_dir():
+                    shutil.rmtree(f)
+
+    # Reset project to untranscribed state
+    project.status = ProjectStatus.created
+    project.segments = []
+    project.language = None
+    storage.save_project(project)
+    return project
 
 
 @app.get("/api/jobs/{job_id}")

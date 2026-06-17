@@ -282,6 +282,19 @@ export async function removeReelVideo(
   return res.json()
 }
 
+export async function cancelJob(jobId: string): Promise<void> {
+  const res = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(`cancel job failed: ${res.status}`)
+}
+
+export async function resetTranscription(projectId: string): Promise<Project> {
+  const res = await fetch(`/api/projects/${projectId}/reset-transcription`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(`reset transcription failed: ${res.status}`)
+  return res.json()
+}
+
 export async function reorderReel(id: string, clipIds: string[]): Promise<ReelDetail> {
   const res = await fetch(`/api/reels/${id}/order`, {
     method: 'PUT',
