@@ -78,6 +78,8 @@ function App() {
   const paramTimer = useRef<number | null>(null)
   const cutTimer = useRef<number | null>(null)
   const wordTimer = useRef<number | null>(null)
+  const scrubTimer = useRef<number | null>(null)
+  const pendingScrubTimeRef = useRef<number | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const removesRef = useRef<[number, number][]>([])
   const previewRef = useRef(preview)
@@ -211,28 +213,39 @@ function App() {
     void selectClip(id)
   }
 
-  // scrub the unified timeline -> seek the right clip at the right local time
+  // scrub the unified timeline -> seek the right clip at the right local time (debounced)
   function onScrub(g: number) {
     const tl = timelineRef.current
     if (!tl) return
+    // Immediate UI update for visual feedback
     setGlobalTime(g)
-    let target = tl.clips[0]
-    for (const c of tl.clips) {
-      if (g >= c.offset && g < c.offset + c.duration) {
-        target = c
-        break
+
+    // Debounce the actual seeking/clip switching
+    if (scrubTimer.current) clearTimeout(scrubTimer.current)
+    pendingScrubTimeRef.current = g
+
+    scrubTimer.current = window.setTimeout(() => {
+      const time = pendingScrubTimeRef.current
+      if (time === null) return
+
+      let target = tl.clips[0]
+      for (const c of tl.clips) {
+        if (time >= c.offset && time < c.offset + c.duration) {
+          target = c
+          break
+        }
+        if (time >= c.offset) target = c
       }
-      if (g >= c.offset) target = c
-    }
-    if (!target) return
-    const local = Math.max(0, g - target.offset)
-    if (target.id === activeIdRef.current) {
-      const v = videoRef.current
-      if (v) v.currentTime = local
-    } else {
-      pendingSeekRef.current = local
-      void selectClip(target.id, true)
-    }
+      if (!target) return
+      const local = Math.max(0, time - target.offset)
+      if (target.id === activeIdRef.current) {
+        const v = videoRef.current
+        if (v) v.currentTime = local
+      } else {
+        pendingSeekRef.current = local
+        void selectClip(target.id, true)
+      }
+    }, 50) // 50ms debounce
   }
 
   function onVideoEnded() {

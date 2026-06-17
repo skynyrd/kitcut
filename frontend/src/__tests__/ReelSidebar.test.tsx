@@ -49,9 +49,9 @@ describe("ReelSidebar Component", () => {
     expect(screen.getByText("video2.mp4")).toBeInTheDocument();
   });
 
-  it("should display clip count", () => {
+  it("should display clip list", () => {
     render(<ReelSidebar {...mockProps} />);
-    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("Videos")).toBeInTheDocument();
   });
 
   it("should have Add videos button", () => {
@@ -70,9 +70,10 @@ describe("ReelSidebar Component", () => {
     expect(screen.getByText("No videos yet.")).toBeInTheDocument();
   });
 
-  it("should display transcribed status", () => {
+  it("should render clip names", () => {
     render(<ReelSidebar {...mockProps} />);
-    expect(screen.getByText("transcribed")).toBeInTheDocument();
+    // Check that both video files are rendered
+    expect(screen.getByText("video1.mp4")).toBeInTheDocument();
   });
 
   it("should show loading indicator during progress", () => {

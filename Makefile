@@ -39,7 +39,7 @@ kill-ports: ## Kill processes on backend ($(PORT)) and frontend (5173) ports
 
 run-tests: ## Run backend and frontend tests
 	@echo "Running backend tests..."
-	@cd backend && ../.venv/bin/pytest tests/ -v
+	@cd backend && .venv/bin/pytest tests/ -v
 	@echo "\nRunning frontend tests..."
 	@cd frontend && npm test -- --run
 
