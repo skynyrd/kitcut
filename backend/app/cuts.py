@@ -116,12 +116,30 @@ def _kept_from_removes(
 
 
 def removed_word_spans(project: Project) -> list[tuple[float, float]]:
-    return [
-        (w.start, w.end)
-        for seg in project.segments
-        for w in seg.words
-        if w.removed and w.end > w.start
-    ]
+    """Spans of removed words, with consecutive removals bridged.
+
+    A maximal run of adjacent removed words (in transcript order, with no kept
+    word between them) becomes one span from the run's start to its end, so the
+    inter-word gaps inside the run are cut too instead of surviving as
+    fragments. A kept word breaks the run.
+    """
+    spans: list[tuple[float, float]] = []
+    run: list[tuple[float, float]] = []
+
+    def flush() -> None:
+        valid = [(s, e) for s, e in run if e > s]
+        if valid:
+            spans.append((min(s for s, _ in valid), max(e for _, e in valid)))
+        run.clear()
+
+    for seg in project.segments:
+        for w in seg.words:
+            if w.removed:
+                run.append((w.start, w.end))
+            else:
+                flush()
+    flush()
+    return spans
 
 
 def project_removes(project: Project) -> list[tuple[float, float]]:
@@ -151,6 +169,9 @@ def cuts_payload(project: Project) -> dict:
         "cut_params": project.cut_params.model_dump(),
         "silences": [g.model_dump() for g in project.silences],
         "cuts": [c.model_dump() for c in project.cuts],
+        "word_cuts": [
+            {"start": s, "end": e} for s, e in removed_word_spans(project)
+        ],
         "kept": project_kept(project),
         "stats": project_stats(project),
     }

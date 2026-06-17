@@ -364,6 +364,10 @@ header {
   background: rgba(231, 76, 200, 0.7);
 }
 
+.legend.word {
+  background: rgba(142, 68, 173, 0.7);
+}
+
 .legend.manual {
   background: rgba(231, 76, 60, 0.7);
 }

@@ -53,6 +53,7 @@ export interface CutsPayload {
   cut_params: CutParams
   silences: { start: number; end: number; kind: SilenceKind }[]
   cuts: CutRegion[]
+  word_cuts: { start: number; end: number }[]
   kept: [number, number][]
   stats: CutStats
 }

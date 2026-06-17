@@ -9,16 +9,18 @@ const COLORS: Record<SilenceKind, string> = {
 }
 const MANUAL_COLOR = 'rgba(231, 76, 60, 0.45)' // red for manual / b-cuts
 const PENDING_COLOR = 'rgba(231, 76, 60, 0.95)'
+const WORD_COLOR = 'rgba(142, 68, 173, 0.40)' // purple for transcript-driven cuts
 
 interface Props {
   audioUrl: string
   cuts: CutRegion[]
+  wordCuts: { start: number; end: number }[]
   revision: number
   onCutsChange: (cuts: CutRegion[]) => void
   videoRef: RefObject<HTMLVideoElement | null>
 }
 
-export function CutTrack({ audioUrl, cuts, revision, onCutsChange, videoRef }: Props) {
+export function CutTrack({ audioUrl, cuts, wordCuts, revision, onCutsChange, videoRef }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wsRef = useRef<any>(null)
@@ -36,7 +38,7 @@ export function CutTrack({ audioUrl, cuts, revision, onCutsChange, videoRef }: P
   function collect(): CutRegion[] {
     const regs = (regionsRef.current?.getRegions() ?? []).filter(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (r: any) => r.id !== 'pending',
+      (r: any) => r.id !== 'pending' && !String(r.id).startsWith('word-'),
     )
     const byId = new Map(cutsRef.current.map((c) => [c.id, c]))
     return regs
@@ -102,6 +104,7 @@ export function CutTrack({ audioUrl, cuts, revision, onCutsChange, videoRef }: P
     })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     regions.on('region-double-clicked', (r: any) => {
+      if (String(r.id).startsWith('word-')) return // transcript cuts are read-only here
       r.remove()
       onCutsChange(collect())
     })
@@ -132,8 +135,19 @@ export function CutTrack({ audioUrl, cuts, revision, onCutsChange, videoRef }: P
         resize: true,
       })
     }
+    // transcript-driven cuts: shown for context, edited via the transcript
+    wordCuts.forEach((w, i) => {
+      regions.addRegion({
+        id: `word-${i}`,
+        start: w.start,
+        end: w.end,
+        color: WORD_COLOR,
+        drag: false,
+        resize: false,
+      })
+    })
     programmatic.current = false
-  }, [ready, revision])
+  }, [ready, revision, wordCuts])
 
   // playhead: drive the wavesurfer cursor from the video (smooth via rAF)
   useEffect(() => {
@@ -250,6 +264,7 @@ export function CutTrack({ audioUrl, cuts, revision, onCutsChange, videoRef }: P
       <p className="hint">
         <span className="legend speech" /> speech cut
         <span className="legend nonspeech" /> b-roll
+        <span className="legend word" /> transcript cut
         <span className="legend manual" /> manual / b-cut · drag edge to adjust · drag empty to add ·
         double-click to remove
       </p>

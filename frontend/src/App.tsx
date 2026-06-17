@@ -44,6 +44,7 @@ function App() {
 
   const [cutParams, setCutParams] = useState<CutParams | null>(null)
   const [cuts, setCuts] = useState<CutRegion[]>([])
+  const [wordCuts, setWordCuts] = useState<{ start: number; end: number }[]>([])
   const [kept, setKept] = useState<[number, number][]>([])
   const [stats, setStats] = useState<CutStats | null>(null)
   const [revision, setRevision] = useState(0)
@@ -123,6 +124,7 @@ function App() {
   function resetCutState() {
     setCutParams(null)
     setCuts([])
+    setWordCuts([])
     setStats(null)
   }
 
@@ -130,6 +132,7 @@ function App() {
     const payload = await updateCutParams(p.id, p.cut_params)
     setCutParams(payload.cut_params)
     setCuts(payload.cuts)
+    setWordCuts(payload.word_cuts)
     setKept(payload.kept)
     setStats(payload.stats)
     setRevision((r) => r + 1)
@@ -177,6 +180,7 @@ function App() {
         const payload = await updateCutParams(project.id, next)
         setCutParams(payload.cut_params)
         setCuts(payload.cuts)
+        setWordCuts(payload.word_cuts)
         setKept(payload.kept)
         setStats(payload.stats)
         setRevision((r) => r + 1)
@@ -215,6 +219,7 @@ function App() {
     wordTimer.current = window.setTimeout(async () => {
       try {
         const payload = await setRemovedWords(project.id, removed)
+        setWordCuts(payload.word_cuts)
         setKept(payload.kept)
         setStats(payload.stats)
       } catch (e) {
@@ -427,6 +432,7 @@ function App() {
               <CutTrack
                 audioUrl={audioUrl(project.id)}
                 cuts={cuts}
+                wordCuts={wordCuts}
                 revision={revision}
                 onCutsChange={onCutsChange}
                 videoRef={videoRef}

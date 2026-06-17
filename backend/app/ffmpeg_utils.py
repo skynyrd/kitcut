@@ -60,6 +60,25 @@ def probe(path: Path) -> dict:
     }
 
 
+def start_timecode(path: Path) -> str | None:
+    """Source start timecode (e.g. '21:26:54;13'), or None. Final Cut anchors
+    an asset's media timeline to this, so clip in/out points must be relative
+    to it — otherwise FCP reports 'no respective media'."""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format_tags=timecode:stream_tags=timecode",
+        "-of", "default=nw=1:nk=1",
+        str(path),
+    ]
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if line and ":" in line:
+            return line
+    return None
+
+
 def extract_audio(src: Path, dst: Path, sample_rate: int = 16000) -> Path:
     """Extract mono PCM WAV suitable for Whisper + silence analysis."""
     dst.parent.mkdir(parents=True, exist_ok=True)
