@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import subprocess
 import uuid
@@ -177,6 +178,45 @@ def get_reel_timeline(reel_id: str) -> dict:
         p for cid in reel.clip_ids if (p := storage.load_project(cid)) is not None
     ]
     return cutlib.reel_timeline(reel, clips)
+
+
+def _audio_fingerprint(clip_ids: list[str]) -> list[list]:
+    """Identity of the inputs for the cached reel audio: order + each clip's
+    audio.wav size & mtime. Any add/remove/reorder/re-transcribe changes it."""
+    fp: list[list] = []
+    for cid in clip_ids:
+        st = storage.audio_path(cid).stat()
+        fp.append([cid, st.st_size, int(st.st_mtime)])
+    return fp
+
+
+@app.get("/api/reels/{reel_id}/audio")
+def get_reel_audio(reel_id: str) -> FileResponse:
+    """One continuous WAV of every clip's audio, concatenated in running order.
+
+    Rebuilt only when the input fingerprint changes; the unified-timeline
+    waveform loads this single file."""
+    reel = _require_reel(reel_id)
+    clip_ids = [cid for cid in reel.clip_ids if storage.load_project(cid) is not None]
+    if not clip_ids:
+        raise HTTPException(status_code=404, detail="reel has no audio")
+
+    parts = [_ensure_audio(cid) for cid in clip_ids]
+    fp = _audio_fingerprint(clip_ids)
+    out = storage.reel_audio_path(reel_id)
+    meta = storage.reel_audio_meta_path(reel_id)
+
+    cached_fp = None
+    if out.exists() and meta.exists():
+        try:
+            cached_fp = json.loads(meta.read_text())
+        except Exception:
+            cached_fp = None
+    if cached_fp != fp or not out.exists():
+        ffmpeg_utils.concat_audio(parts, out)
+        meta.write_text(json.dumps(fp))
+
+    return FileResponse(out)
 
 
 @app.post("/api/reels/{reel_id}/videos")

@@ -7,7 +7,6 @@ import {
 } from 'react'
 import {
   addReelVideos,
-  audioUrl,
   createReel,
   editWordText,
   fcpxmlUrl,
@@ -36,9 +35,8 @@ import {
   type ReelDetail,
   type ReelTimeline as ReelTimelineData,
 } from './api'
-import { CutTrack } from './components/CutTrack'
 import { ReelSidebar } from './components/ReelSidebar'
-import { ReelTimeline } from './components/ReelTimeline'
+import { ReelWaveTimeline } from './components/ReelWaveTimeline'
 import { SilenceControls } from './components/SilenceControls'
 import { TranscriptView } from './components/TranscriptView'
 import './App.css'
@@ -56,6 +54,7 @@ function App() {
   const [busyIds, setBusyIds] = useState<string[]>([])
   const [timeline, setTimeline] = useState<ReelTimelineData | null>(null)
   const [globalTime, setGlobalTime] = useState(0)
+  const [audioRev, setAudioRev] = useState(0) // bumped when the reel audio changes
 
   // active-clip editing state
   const [project, setProject] = useState<Project | null>(null)
@@ -66,11 +65,8 @@ function App() {
   const [error, setError] = useState<string | null>(null)
 
   const [cutParams, setCutParams] = useState<CutParams | null>(null)
-  const [cuts, setCuts] = useState<CutRegion[]>([])
-  const [wordCuts, setWordCuts] = useState<{ start: number; end: number }[]>([])
   const [kept, setKept] = useState<[number, number][]>([])
   const [stats, setStats] = useState<CutStats | null>(null)
-  const [revision, setRevision] = useState(0)
   const [cutBusy, setCutBusy] = useState(false)
   const [scope, setScope] = useState<'all' | 'clip'>('all')
   const [preview, setPreview] = useState(true)
@@ -193,11 +189,8 @@ function App() {
       setProject(p)
       const payload = await getCuts(id)
       setCutParams(payload.cut_params)
-      setCuts(payload.cuts)
-      setWordCuts(payload.word_cuts)
       setKept(payload.kept)
       setStats(payload.stats)
-      setRevision((r) => r + 1)
     } catch (e) {
       setError(String(e))
     }
@@ -273,6 +266,7 @@ function App() {
       setReel(detail.reel)
       setClips(detail.clips)
       await refreshTimeline()
+      setAudioRev((n) => n + 1)
       if (!activeIdRef.current && detail.clips.length) void selectClip(detail.clips[0].id)
     } catch (e) {
       setError(String(e))
@@ -288,6 +282,7 @@ function App() {
       setReel(detail.reel)
       setClips(detail.clips)
       await refreshTimeline()
+      setAudioRev((n) => n + 1)
       if (activeIdRef.current === id) {
         const next = detail.clips[0]?.id ?? null
         if (next) void selectClip(next, true)
@@ -312,6 +307,7 @@ function App() {
       setReel(detail.reel)
       setClips(detail.clips)
       await refreshTimeline()
+      setAudioRev((n) => n + 1)
     } catch (e) {
       setError(String(e))
     }
@@ -346,6 +342,7 @@ function App() {
                   setClips(detail.clips)
                 }
                 await refreshTimeline()
+                setAudioRev((n) => n + 1)
               } catch {
                 /* ignore refresh failure */
               }
@@ -385,11 +382,8 @@ function App() {
   async function reloadActiveCuts(id: string) {
     const payload = await getCuts(id)
     setCutParams(payload.cut_params)
-    setCuts(payload.cuts)
-    setWordCuts(payload.word_cuts)
     setKept(payload.kept)
     setStats(payload.stats)
-    setRevision((r) => r + 1)
   }
 
   function applyParams(next: CutParams) {
@@ -411,11 +405,8 @@ function App() {
         } else if (id) {
           const payload = await updateCutParams(id, next)
           setCutParams(payload.cut_params)
-          setCuts(payload.cuts)
-          setWordCuts(payload.word_cuts)
           setKept(payload.kept)
           setStats(payload.stats)
-          setRevision((x) => x + 1)
         }
         await refreshTimeline()
       } catch (e) {
@@ -426,16 +417,16 @@ function App() {
     }, 250)
   }
 
-  function onCutsChange(next: CutRegion[]) {
-    setCuts(next)
-    const id = activeIdRef.current
-    if (!id) return
+  // persist a cut edit to its owning clip (active or not); refresh the timeline
+  function onClipCutsChange(clipId: string, next: CutRegion[]) {
     if (cutTimer.current) clearTimeout(cutTimer.current)
     cutTimer.current = window.setTimeout(async () => {
       try {
-        const payload = await replaceCuts(id, next)
-        setKept(payload.kept)
-        setStats(payload.stats)
+        const payload = await replaceCuts(clipId, next)
+        if (clipId === activeIdRef.current) {
+          setKept(payload.kept)
+          setStats(payload.stats)
+        }
         await refreshTimeline()
       } catch (e) {
         setError(String(e))
@@ -456,7 +447,6 @@ function App() {
     wordTimer.current = window.setTimeout(async () => {
       try {
         const payload = await setRemovedWords(id, removed)
-        setWordCuts(payload.word_cuts)
         setKept(payload.kept)
         setStats(payload.stats)
         await refreshTimeline()
@@ -688,49 +678,36 @@ function App() {
                           {totals.final_s}s final (−{totals.removed_s}s)
                         </span>
                       )}
+                      {transcribed && (
+                        <a className="export-btn" href={fcpxmlUrl(project.id)}>
+                          Export clip
+                        </a>
+                      )}
                       <a className="export-btn" href={reelFcpxmlUrl(timeline.reel.id)}>
                         Export FCPXML
                       </a>
                     </div>
                   </div>
-                  <ReelTimeline
+                  <ReelWaveTimeline
+                    reelId={timeline.reel.id}
                     clips={timeline.clips}
-                    globalTime={globalTime}
                     activeId={activeId}
+                    globalTime={globalTime}
+                    audioRev={audioRev}
                     onScrub={onScrub}
-                  />
-                  <p className="hint rt-hint">
-                    Click or drag to scrub across all videos. Edit cuts for the active clip below.
-                  </p>
-                </section>
-              )}
-
-              {transcribed && cutParams && (
-                <section className="panel timeline-area">
-                  <div className="panel-head">
-                    <h2>Active clip · {project.name}</h2>
-                    <div className="head-tools">
-                      <a className="export-btn" href={fcpxmlUrl(project.id)}>
-                        Export clip FCPXML
-                      </a>
-                    </div>
-                  </div>
-                  <CutTrack
-                    audioUrl={audioUrl(project.id)}
-                    cuts={cuts}
-                    wordCuts={wordCuts}
-                    revision={revision}
-                    onCutsChange={onCutsChange}
+                    onClipCutsChange={onClipCutsChange}
                     videoRef={videoRef}
                   />
-                  <SilenceControls
-                    params={scope === 'all' && reel ? reel.default_cut_params : cutParams}
-                    stats={stats}
-                    busy={cutBusy}
-                    scope={scope}
-                    onScopeChange={setScope}
-                    onChange={applyParams}
-                  />
+                  {transcribed && cutParams && (
+                    <SilenceControls
+                      params={scope === 'all' && reel ? reel.default_cut_params : cutParams}
+                      stats={stats}
+                      busy={cutBusy}
+                      scope={scope}
+                      onScopeChange={setScope}
+                      onChange={applyParams}
+                    />
+                  )}
                 </section>
               )}
             </>

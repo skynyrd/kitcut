@@ -310,6 +310,12 @@ export function reelFcpxmlUrl(id: string): string {
   return `/api/reels/${id}/export/fcpxml`
 }
 
+/** Concatenated audio of every clip in the reel (one continuous WAV).
+ *  `v` is a cache-busting token bumped when the reel's audio changes. */
+export function reelAudioUrl(id: string, v?: number | string): string {
+  return `/api/reels/${id}/audio${v != null ? `?v=${v}` : ''}`
+}
+
 export function videoUrl(id: string): string {
   return `/api/projects/${id}/video`
 }

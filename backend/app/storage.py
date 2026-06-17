@@ -80,6 +80,15 @@ def reel_json_path(reel_id: str) -> Path:
     return REELS_DIR / f"{reel_id}.json"
 
 
+def reel_audio_path(reel_id: str) -> Path:
+    return REELS_DIR / f"{reel_id}.audio.wav"
+
+
+def reel_audio_meta_path(reel_id: str) -> Path:
+    """Sidecar fingerprint of the inputs the cached reel audio was built from."""
+    return REELS_DIR / f"{reel_id}.audio.json"
+
+
 def save_reel(reel: Reel) -> None:
     REELS_DIR.mkdir(parents=True, exist_ok=True)
     reel_json_path(reel.id).write_text(reel.model_dump_json(indent=2))

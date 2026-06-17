@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -95,4 +96,37 @@ def extract_audio(src: Path, dst: Path, sample_rate: int = 16000) -> Path:
     out = subprocess.run(cmd, capture_output=True, text=True)
     if out.returncode != 0:
         raise FFmpegError(out.stderr.strip() or "ffmpeg audio extraction failed")
+    return dst
+
+
+def concat_audio(parts: list[Path], dst: Path, sample_rate: int = 16000) -> Path:
+    """Concatenate equal-format WAVs (mono PCM) into one PCM WAV, in order.
+
+    Inputs are the per-clip `audio.wav` files (all extracted with the same
+    settings), so the concat demuxer joins them cleanly; we re-encode to PCM to
+    keep the output uniform regardless of source quirks."""
+    if not parts:
+        raise FFmpegError("no audio parts to concatenate")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    listing = "".join(f"file '{p.resolve().as_posix()}'\n" for p in parts)
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+    try:
+        tmp.write(listing)
+        tmp.close()
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", tmp.name,
+            "-ac", "1",
+            "-ar", str(sample_rate),
+            "-c:a", "pcm_s16le",
+            str(dst),
+        ]
+        out = subprocess.run(cmd, capture_output=True, text=True)
+        if out.returncode != 0:
+            raise FFmpegError(out.stderr.strip() or "ffmpeg audio concat failed")
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
     return dst
