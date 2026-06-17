@@ -3,7 +3,7 @@
 PIP  := backend/.venv/bin/pip
 PORT ?= 8000
 
-.PHONY: help setup setup-backend setup-frontend backend frontend dev clean kill-ports
+.PHONY: help setup setup-backend setup-frontend backend frontend dev clean kill-ports test run-tests
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -36,6 +36,15 @@ kill-ports: ## Kill processes on backend ($(PORT)) and frontend (5173) ports
 	@lsof -ti:$(PORT) | xargs -r kill -9 2>/dev/null || true
 	@lsof -ti:5173 | xargs -r kill -9 2>/dev/null || true
 	@echo "Killed processes on ports $(PORT) and 5173"
+
+run-tests: ## Run backend and frontend tests
+	@echo "Running backend tests..."
+	@cd backend && ../.venv/bin/pytest tests/ -v
+	@echo "\nRunning frontend tests..."
+	@cd frontend && npm test -- --run
+
+test: ## Alias for run-tests
+	@make run-tests
 
 clean: ## Remove build artifacts, venv, node_modules
 	rm -rf backend/.venv frontend/node_modules frontend/dist

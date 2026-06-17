@@ -285,6 +285,10 @@ export function ReelWaveTimeline({
     regions.clearRegions()
     manualIds.current.clear()
     selectedRef.current = null
+
+    // Show word regions and labels only when zoomed in (> 100px/sec)
+    const showDetails = pxPerSec > 100
+
     clips.forEach((c, ci) => {
       const band = regions.addRegion({
         id: `band::${c.id}`,
@@ -300,26 +304,34 @@ export function ReelWaveTimeline({
         if (ci === clips.length - 1) band.element.style.borderRight = DIVIDER
         if (c.id === activeId) band.element.style.boxShadow = ACTIVE_FRAME
       }
-      const lab = regions.addRegion({
-        id: `label::${c.id}`,
-        start: c.offset,
-        content: labelEl(c.name, c.id === activeId),
-        color: 'transparent',
-        drag: false,
-        resize: false,
-      })
-      if (lab.element) lab.element.style.pointerEvents = 'none'
-      c.word_cuts.forEach((w, i) => {
-        const wr = regions.addRegion({
-          id: `${c.id}::word-${i}`,
-          start: c.offset + w.start,
-          end: c.offset + w.end,
-          color: WORD_COLOR,
+
+      // Only show clip labels when zoomed in
+      if (showDetails) {
+        const lab = regions.addRegion({
+          id: `label::${c.id}`,
+          start: c.offset,
+          content: labelEl(c.name, c.id === activeId),
+          color: 'transparent',
           drag: false,
           resize: false,
         })
-        if (wr.element) wr.element.style.pointerEvents = 'none'
-      })
+        if (lab.element) lab.element.style.pointerEvents = 'none'
+      }
+
+      // Only show word regions when zoomed in
+      if (showDetails) {
+        c.word_cuts.forEach((w, i) => {
+          const wr = regions.addRegion({
+            id: `${c.id}::word-${i}`,
+            start: c.offset + w.start,
+            end: c.offset + w.end,
+            color: WORD_COLOR,
+            drag: false,
+            resize: false,
+          })
+          if (wr.element) wr.element.style.pointerEvents = 'none'
+        })
+      }
       for (const cut of c.cuts) {
         regions.addRegion({
           id: `${c.id}::${cut.id}`,
@@ -332,7 +344,7 @@ export function ReelWaveTimeline({
       }
     })
     programmatic.current = false
-  }, [ready, clips, activeId])
+  }, [ready, clips, activeId, pxPerSec])
 
   // smooth playhead from the active video (rAF); offset read live via refs
   useEffect(() => {

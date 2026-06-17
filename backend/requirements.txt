@@ -6,3 +6,5 @@ websockets
 faster-whisper
 whisperx
 certifi
+pytest
+httpx
