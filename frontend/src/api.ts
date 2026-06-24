@@ -11,6 +11,7 @@ export interface Word {
   start: number
   end: number
   removed: boolean
+  hidden?: boolean
 }
 
 export interface Segment {
@@ -218,6 +219,19 @@ export async function setRemovedWords(
     body: JSON.stringify({ removed }),
   })
   if (!res.ok) throw new Error(`set removed words failed: ${res.status}`)
+  return res.json()
+}
+
+export async function setHiddenWords(
+  id: string,
+  hidden: [number, number][],
+): Promise<CutsPayload> {
+  const res = await fetch(`/api/projects/${id}/hidden-words`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hidden }),
+  })
+  if (!res.ok) throw new Error(`set hidden words failed: ${res.status}`)
   return res.json()
 }
 

@@ -664,6 +664,15 @@ header {
   opacity: 0.38;
 }
 
+/* transcript-only removal — kept distinct from the red video-cut strikethrough */
+.word.hidden {
+  text-decoration: line-through dotted;
+  text-decoration-color: #5fb0c9;
+  color: #5fb0c9;
+  font-style: italic;
+  opacity: 0.5;
+}
+
 .word.active {
   background: #f1c40f66;
 }
@@ -694,6 +703,11 @@ header {
 
 .seg-action:hover {
   opacity: 1;
+}
+
+.seg-action.remove {
+  border-color: #5fb0c9aa;
+  color: #5fb0c9;
 }
 
 .muted {

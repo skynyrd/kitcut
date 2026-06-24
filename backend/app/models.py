@@ -9,7 +9,8 @@ class Word(BaseModel):
     text: str
     start: float
     end: float
-    removed: bool = False
+    removed: bool = False  # cut from the video (footage trimmed) + dropped from subtitles
+    hidden: bool = False  # dropped from transcript + subtitles only; video kept untouched
 
 
 class Segment(BaseModel):

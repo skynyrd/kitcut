@@ -23,6 +23,7 @@ import {
   reorderReel,
   replaceCuts,
   resetTranscription,
+  setHiddenWords,
   setRemovedWords,
   startTranscribe,
   updateCutParams,
@@ -82,6 +83,10 @@ function App() {
   const paramTimer = useRef<number | null>(null)
   const cutTimer = useRef<number | null>(null)
   const wordTimer = useRef<number | null>(null)
+  const hiddenTimer = useRef<number | null>(null)
+  // bumped on any clip-membership change (add/remove/reorder) so the background
+  // proxy poll can discard a getReel result that raced with the mutation
+  const clipMutation = useRef(0)
   const scrubTimer = useRef<number | null>(null)
   const editLoadTimer = useRef<number | null>(null)
   const pendingScrubTimeRef = useRef<number | null>(null)
@@ -236,8 +241,11 @@ function App() {
       try {
         const r = reelRef.current
         if (r) {
+          const gen = clipMutation.current
           const detail = await getReel(r.id)
-          if (stop) return
+          // a delete/reorder/add landed while this fetch was in flight → its
+          // clip list is now stale; drop it so we don't resurrect a removed clip
+          if (stop || gen !== clipMutation.current) return
           const active = detail.clips.find((c) => c.id === activeIdRef.current)
           // preserve playhead + play state across the original→proxy upgrade remount
           if (
@@ -394,6 +402,7 @@ function App() {
 
   async function onAddVideos(files: File[]) {
     if (!reelRef.current) return
+    clipMutation.current += 1
     setError(null)
     setProgressMsg('uploading…')
     try {
@@ -413,14 +422,20 @@ function App() {
 
   async function onRemoveClip(id: string) {
     if (!reelRef.current) return
+    clipMutation.current += 1
+    const oldIdx = clips.findIndex((c) => c.id === id)
     try {
       const detail = await removeReelVideo(reelRef.current.id, id)
       setReel(detail.reel)
       setClips(detail.clips)
       await refreshTimeline()
-      setAudioRev((n) => n + 1)
+      // No audioRev bump: the page audio URL keys off its clipIds, so the
+      // waveform only rebuilds when the *visible* page's clips actually change —
+      // deleting a clip on another page leaves the timeline (and cursor) put.
       if (activeIdRef.current === id) {
-        const next = detail.clips[0]?.id ?? null
+        // focus the clip that took this one's place (or the new last), not the
+        // reel's first clip, so deleting mid-reel doesn't fling you to the start
+        const next = detail.clips[Math.min(oldIdx, detail.clips.length - 1)]?.id ?? null
         if (next) goToClip(next, 0)
         else {
           setActiveId(null)
@@ -435,6 +450,7 @@ function App() {
 
   async function onReorder(ids: string[]) {
     if (!reelRef.current) return
+    clipMutation.current += 1
     setClips(
       (prev) => ids.map((id) => prev.find((c) => c.id === id)).filter(Boolean) as ClipSummary[],
     )
@@ -646,6 +662,36 @@ function App() {
     })
   }
 
+  // Transcript-only removal: persists `hidden`, which the backend keeps out of
+  // subtitles but never cuts from the video — so no timeline refresh is needed.
+  function persistHiddenWords(segments: Project['segments']) {
+    const id = activeIdRef.current
+    if (!id) return
+    const hidden: [number, number][] = []
+    segments.forEach((seg) =>
+      seg.words.forEach((w, i) => {
+        if (w.hidden) hidden.push([seg.id, i])
+      }),
+    )
+    if (hiddenTimer.current) clearTimeout(hiddenTimer.current)
+    hiddenTimer.current = window.setTimeout(() => {
+      setHiddenWords(id, hidden).catch((e) => setError(String(e)))
+    }, 150)
+  }
+
+  function toggleHiddenSegment(segId: number, hidden: boolean) {
+    setProject((prev) => {
+      if (!prev) return prev
+      const segments = prev.segments.map((seg) =>
+        seg.id !== segId
+          ? seg
+          : { ...seg, words: seg.words.map((w) => ({ ...w, hidden })) },
+      )
+      persistHiddenWords(segments)
+      return { ...prev, segments }
+    })
+  }
+
   function editWord(segId: number, idx: number, text: string) {
     setProject((prev) => {
       if (!prev) return prev
@@ -698,7 +744,7 @@ function App() {
           if (!seg) return undefined
           const text = seg.words.length
             ? seg.words
-                .filter((w) => !w.removed)
+                .filter((w) => !w.removed && !w.hidden)
                 .map((w) => w.text)
                 .join('')
                 .trim()
@@ -826,6 +872,7 @@ function App() {
                       currentTime={currentTime}
                       onToggleWord={toggleWord}
                       onToggleSegment={toggleSegment}
+                      onToggleHiddenSegment={toggleHiddenSegment}
                       onSeek={seek}
                       onEditWord={editWord}
                     />

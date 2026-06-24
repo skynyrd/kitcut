@@ -7,12 +7,30 @@ from xml.sax.saxutils import escape
 
 from . import cuts as cutlib
 from . import ffmpeg_utils
+from . import storage
 from .models import Project, Reel, Segment
+
+# Built-in "Slide" transition + the auto Audio Crossfade FCP pairs with it. These
+# uids are stable FCP identifiers (reverse-engineered from a real Export XML); FCP
+# resolves the effect by uid, not the localized display name.
+SLIDE_EFFECT_UID = "FxPlug:6AAB0D54-FCD8-4EBD-A62D-D352A5ED1648"
+AUDIO_XFADE_UID = "FFAudioTransition"
+TRANSITION_FRAMES = 6  # transition length, in sequence frames
+SFX_FILENAME = "Air Swipe 05.wav"  # connected swipe sound, resolved in storage.BASE_DIR
+
+
+def _sfx_source() -> Path | None:
+    """The swipe sound file, or None when it isn't present (transitions still emit
+    their video Slide; only the SFX is skipped)."""
+    p = storage.BASE_DIR / SFX_FILENAME
+    return p if p.exists() else None
 
 
 def _segment_text(seg: Segment) -> str:
     if seg.words:
-        return "".join(w.text for w in seg.words if not w.removed).strip()
+        return "".join(
+            w.text for w in seg.words if not w.removed and not w.hidden
+        ).strip()
     return seg.text.strip()
 
 
@@ -224,10 +242,46 @@ def build_fcpxml(
     )
 
 
+def _render_asset_clip(open_tag: str, children: list[str]) -> str:
+    if children:
+        return open_tag + ">\n" + "\n".join(children) + "\n          </asset-clip>"
+    return open_tag + "/>"
+
+
+def _render_transition(off_frames: int, seq_fd: tuple[int, int]) -> str:
+    """A 6-frame built-in Slide, centered on the edit, plus the Audio Crossfade FCP
+    pairs with it. The params are deliberately omitted: Final Cut *exports* popup
+    params as 'index (Label)' (e.g. '2 (Right)') but its *importer* rejects that
+    form ('Encountered an unexpected value'), so we let the Slide use its defaults."""
+    return (
+        f'          <transition name="Slide" offset="{_tf(off_frames, seq_fd)}" '
+        f'duration="{_tf(TRANSITION_FRAMES, seq_fd)}">\n'
+        '            <filter-video ref="rSlide" name="Slide"/>\n'
+        '            <filter-audio ref="rAudX" name="Audio Crossfade"/>\n'
+        "          </transition>"
+    )
+
+
+def _render_sfx_child(
+    rec: dict, half: int, seq_fd: tuple[int, int], dur_str: str
+) -> str:
+    """Connected swipe sound on lane -1, nested in the preceding clip and anchored
+    at the transition's first frame (= 3 frames before that clip's out-point)."""
+    fd = rec["fd"]
+    parent_start_s = (rec["t0"] + rec["in_frames"]) * fd[0] / fd[1]
+    off_s = parent_start_s + (rec["len_frames"] - half) * seq_fd[0] / seq_fd[1]
+    off_frames = round(off_s * seq_fd[1] / seq_fd[0])
+    return (
+        f'            <asset-clip ref="rSfx" lane="-1" offset="{_tf(off_frames, seq_fd)}" '
+        f'name="Air Swipe 05" duration="{dur_str}" format="rSfxF" audioRole="dialogue"/>'
+    )
+
+
 def build_reel_fcpxml(
     reel: Reel,
     clips: list[tuple[Project, Path]],
     subtitle_mode: str = "title",
+    transitions: bool = True,
 ) -> str:
     """One Final Cut sequence concatenating every clip's kept intervals in order.
 
@@ -249,11 +303,23 @@ def build_reel_fcpxml(
         seq_fd = (1001, 60000) if round(seq_fps) >= 50 else (1001, 30000)
     seq_audio_rate = first_clip.audio_rate or 48000
 
+    add_transitions = transitions and len(clips) >= 2
+    half = TRANSITION_FRAMES // 2
+    sfx_src = _sfx_source() if add_transitions else None
+    if sfx_src is not None:
+        sfx_meta = ffmpeg_utils.probe(sfx_src)
+        sfx_rate = sfx_meta.get("audio_rate") or 44100
+        sfx_dur_str = _tf(
+            max(1, _to_frames(sfx_meta.get("duration") or 0.0, seq_fd)), seq_fd
+        )
+        sfx_url = "file://" + quote(str(sfx_src.resolve()))
+
     resources: list[str] = []
-    spine: list[str] = []
-    pos = 0  # cumulative timeline position across the whole reel, in seq frames
     style_id = 0
     seq_tcfmt = "NDF"
+    # Pass 1: per-clip raw intervals (timeline offset + handle trimming applied
+    # later, once we know where the clip-to-clip junctions are).
+    clips_meta: list[dict] = []
 
     for idx, (clip, src) in enumerate(clips):
         fps = clip.fps or 25.0
@@ -295,20 +361,14 @@ def build_reel_fcpxml(
         )
 
         kept = cutlib.project_kept(clip) or [(0.0, duration)]
-        ci = 0
+        intervals: list[dict] = []
         for s, e in kept:
             in_frames = _to_frames(s, fd)
             # clamp so the source range can't run past the asset's media (rounding
             # can push the last kept interval ~1 frame over → FCP "no respective media")
-            len_frames = min(_to_frames(e - s, seq_fd), asset_dur_frames - in_frames)
-            if len_frames <= 0:
+            raw_len = min(_to_frames(e - s, seq_fd), asset_dur_frames - in_frames)
+            if raw_len <= 0:
                 continue
-            ci += 1
-            open_tag = (
-                f'          <asset-clip ref="{asset_id}" name="{name} {ci}" '
-                f'offset="{_tf(pos, seq_fd)}" start="{_tf(t0 + in_frames, fd)}" '
-                f'duration="{_tf(len_frames, seq_fd)}" tcFormat="{tcfmt}"'
-            )
             subs: list[str] = []
             for seg in clip.segments:
                 ov_s = max(seg.start, s)
@@ -326,13 +386,90 @@ def build_reel_fcpxml(
                 off = _tf(_to_frames(t0_sec + ov_s, seq_fd), seq_fd)
                 dur = _tf(_to_frames(ov_e - ov_s, seq_fd), seq_fd)
                 subs.append(_subtitle_piece(use_title, lang, style_id, off, dur, text))
-            if subs:
-                spine.append(
-                    open_tag + ">\n" + "\n".join(subs) + "\n          </asset-clip>"
-                )
-            else:
-                spine.append(open_tag + "/>")
-            pos += len_frames
+            intervals.append({"in_frames": in_frames, "raw_len": raw_len, "subs": subs})
+        clips_meta.append(
+            {"fd": fd, "t0": t0, "tcfmt": tcfmt, "asset_id": asset_id,
+             "name": name, "intervals": intervals}
+        )
+
+    # Decide junctions between consecutive non-empty clips. A centered transition
+    # needs `half` frames of handle media on each side; whole-video clips span the
+    # full asset and have none, so we trim `half` off the inside edge of each
+    # boundary clip — those trimmed frames become the handle FCP slides into.
+    ne = [i for i, m in enumerate(clips_meta) if m["intervals"]]
+    trim_head: set[int] = set()
+    trim_tail: set[int] = set()
+    junctions: list[tuple[int, int]] = []
+    if add_transitions:
+        for k in range(1, len(ne)):
+            a, b = ne[k - 1], ne[k]
+            # ≥ a full transition of frames so an edge can give head+tail and stay >0
+            if (
+                clips_meta[a]["intervals"][-1]["raw_len"] >= 2 * TRANSITION_FRAMES
+                and clips_meta[b]["intervals"][0]["raw_len"] >= 2 * TRANSITION_FRAMES
+            ):
+                trim_tail.add(a)
+                trim_head.add(b)
+                junctions.append((a, b))
+
+    # Pass 2: lay the (trimmed) clips end-to-end, building records with offsets.
+    pos = 0  # cumulative timeline position across the whole reel, in seq frames
+    records: list[dict] = []
+    first_ri: dict[int, int] = {}
+    last_ri: dict[int, int] = {}
+    for i, m in enumerate(clips_meta):
+        ivs = m["intervals"]
+        if not ivs:
+            continue
+        fd, t0, tcfmt = m["fd"], m["t0"], m["tcfmt"]
+        asset_id, name, n = m["asset_id"], m["name"], len(ivs)
+        for j, iv in enumerate(ivs):
+            th = half if (j == 0 and i in trim_head) else 0
+            tt = half if (j == n - 1 and i in trim_tail) else 0
+            in_f = iv["in_frames"] + th
+            length = iv["raw_len"] - th - tt
+            open_tag = (
+                f'          <asset-clip ref="{asset_id}" name="{name} {j + 1}" '
+                f'offset="{_tf(pos, seq_fd)}" start="{_tf(t0 + in_f, fd)}" '
+                f'duration="{_tf(length, seq_fd)}" tcFormat="{tcfmt}"'
+            )
+            ri = len(records)
+            records.append(
+                {
+                    "open_tag": open_tag,
+                    "subs": iv["subs"],
+                    "extra": [],
+                    "pos": pos,
+                    "len_frames": length,
+                    "fd": fd,
+                    "t0": t0,
+                    "in_frames": in_f,
+                }
+            )
+            if j == 0:
+                first_ri[i] = ri
+            if j == n - 1:
+                last_ri[i] = ri
+            pos += length
+
+    # A Slide at each junction (centered on the trimmed edit) + the swipe SFX hung
+    # off the preceding clip, anchored to the transition's first frame.
+    transition_before: dict[int, str] = {}
+    used_transition = used_sfx = False
+    for a, b in junctions:
+        bi = first_ri[b]
+        transition_before[bi] = _render_transition(records[bi]["pos"] - half, seq_fd)
+        used_transition = True
+        if sfx_src is not None:
+            ar = records[last_ri[a]]
+            ar["extra"].append(_render_sfx_child(ar, half, seq_fd, sfx_dur_str))
+            used_sfx = True
+
+    spine_parts: list[str] = []
+    for k, rec in enumerate(records):
+        if k in transition_before:
+            spine_parts.append(transition_before[k])
+        spine_parts.append(_render_asset_clip(rec["open_tag"], rec["subs"] + rec["extra"]))
 
     effect_res = (
         '    <effect id="r3" name="Basic Title" '
@@ -341,8 +478,22 @@ def build_reel_fcpxml(
         if use_title
         else ""
     )
+    if used_transition:
+        effect_res += (
+            f'    <effect id="rSlide" name="Slide" uid="{SLIDE_EFFECT_UID}"/>\n'
+            f'    <effect id="rAudX" name="Audio Crossfade" uid="{AUDIO_XFADE_UID}"/>\n'
+        )
+    if used_sfx:
+        effect_res += (
+            '    <format id="rSfxF" name="FFVideoFormatRateUndefined"/>\n'
+            f'    <asset id="rSfx" name="Air Swipe 05" start="0s" '
+            f'duration="{sfx_dur_str}" hasAudio="1" audioSources="1" '
+            f'audioChannels="2" audioRate="{sfx_rate}">\n'
+            f'      <media-rep kind="original-media" src="{sfx_url}"/>\n'
+            "    </asset>\n"
+        )
     resources_xml = "".join(resources) + effect_res
-    spine_xml = "\n".join(spine)
+    spine_xml = "\n".join(spine_parts)
     reel_name = escape(reel.name)
 
     return (

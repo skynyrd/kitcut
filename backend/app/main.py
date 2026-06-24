@@ -514,7 +514,7 @@ def export_fcpxml(project_id: str) -> Response:
 
 
 @app.get("/api/reels/{reel_id}/export/fcpxml")
-def export_reel_fcpxml(reel_id: str) -> Response:
+def export_reel_fcpxml(reel_id: str, transitions: bool = True) -> Response:
     reel = _require_reel(reel_id)
     clips: list[tuple[Project, Path]] = []
     for cid in reel.clip_ids:
@@ -527,7 +527,7 @@ def export_reel_fcpxml(reel_id: str) -> Response:
         clips.append((p, src))
     if not clips:
         raise HTTPException(status_code=400, detail="reel has no videos to export")
-    xml = fcpxml.build_reel_fcpxml(reel, clips)
+    xml = fcpxml.build_reel_fcpxml(reel, clips, transitions=transitions)
     return Response(
         content=xml,
         media_type="application/xml",
@@ -546,6 +546,24 @@ def set_removed_words(project_id: str, body: RemovedWords) -> dict:
     for seg in project.segments:
         for idx, word in enumerate(seg.words):
             word.removed = (seg.id, idx) in removed
+    storage.save_project(project)
+    return cutlib.cuts_payload(project)
+
+
+class HiddenWords(BaseModel):
+    hidden: list[tuple[int, int]]  # (segment_id, word_index) pairs
+
+
+@app.put("/api/projects/{project_id}/hidden-words")
+def set_hidden_words(project_id: str, body: HiddenWords) -> dict:
+    """Mark words as transcript-only removed: dropped from the transcript and
+    subtitles, but the footage is kept (unlike `removed-words`, which cuts the
+    video). Leaves cuts/kept untouched, so the reel timeline is unaffected."""
+    project = _require_project(project_id)
+    hidden = {(s, i) for s, i in body.hidden}
+    for seg in project.segments:
+        for idx, word in enumerate(seg.words):
+            word.hidden = (seg.id, idx) in hidden
     storage.save_project(project)
     return cutlib.cuts_payload(project)
 

@@ -16,6 +16,7 @@ interface Props {
   currentTime: number
   onToggleWord: (segId: number, idx: number) => void
   onToggleSegment: (segId: number, removed: boolean) => void
+  onToggleHiddenSegment: (segId: number, hidden: boolean) => void
   onSeek: (t: number) => void
   onEditWord: (segId: number, idx: number, text: string) => void
 }
@@ -25,6 +26,7 @@ export function TranscriptView({
   currentTime,
   onToggleWord,
   onToggleSegment,
+  onToggleHiddenSegment,
   onSeek,
   onEditWord,
 }: Props) {
@@ -82,10 +84,12 @@ export function TranscriptView({
   return (
     <div className="transcript">
       <p className="hint">
-        Click a word to cut it · double-click to edit text · click the time to seek
+        Click a word to cut it · double-click to edit text · click the time to seek ·
+        “cut” trims the video, “remove” drops only the text
       </p>
       {segments.map((seg) => {
         const allRemoved = seg.words.length > 0 && seg.words.every((w) => w.removed)
+        const allHidden = seg.words.length > 0 && seg.words.every((w) => w.hidden)
         return (
           <p key={seg.id} className="segment">
             <button
@@ -123,6 +127,7 @@ export function TranscriptView({
                         className={
                           'word' +
                           (w.removed ? ' removed' : '') +
+                          (w.hidden ? ' hidden' : '') +
                           (id === activeId ? ' active' : '')
                         }
                         title={`${w.start.toFixed(2)}s`}
@@ -138,9 +143,20 @@ export function TranscriptView({
             <button
               className="seg-action"
               onClick={() => onToggleSegment(seg.id, !allRemoved)}
-              title={allRemoved ? 'restore sentence' : 'cut sentence'}
+              title={allRemoved ? 'restore sentence' : 'cut sentence (trims the video)'}
             >
               {allRemoved ? 'restore' : 'cut'}
+            </button>
+            <button
+              className="seg-action remove"
+              onClick={() => onToggleHiddenSegment(seg.id, !allHidden)}
+              title={
+                allHidden
+                  ? 'restore text'
+                  : 'remove text only (keeps the video)'
+              }
+            >
+              {allHidden ? 'restore' : 'remove'}
             </button>
           </p>
         )
