@@ -75,6 +75,7 @@ export interface Project {
   height: number | null
   fps: number | null
   language: string | null
+  proxy_ready: boolean
   status: ProjectStatus
   error: string | null
   segments: Segment[]
@@ -92,6 +93,7 @@ export interface ClipSummary {
   status: ProjectStatus
   language: string | null
   transcribed: boolean
+  proxy_ready: boolean
 }
 
 export interface Reel {
@@ -255,6 +257,13 @@ export async function getReel(id: string): Promise<ReelDetail> {
   return res.json()
 }
 
+/** Backfill: ask the backend to build proxies for any clips that lack one. */
+export async function buildReelProxies(id: string): Promise<{ pending: number }> {
+  const res = await fetch(`/api/reels/${id}/build-proxies`, { method: 'POST' })
+  if (!res.ok) throw new Error(`build proxies failed: ${res.status}`)
+  return res.json()
+}
+
 export async function getReelTimeline(id: string): Promise<ReelTimeline> {
   const res = await fetch(`/api/reels/${id}/timeline`)
   if (!res.ok) throw new Error(`get reel timeline failed: ${res.status}`)
@@ -323,14 +332,28 @@ export function reelFcpxmlUrl(id: string): string {
   return `/api/reels/${id}/export/fcpxml`
 }
 
-/** Concatenated audio of every clip in the reel (one continuous WAV).
- *  `v` is a cache-busting token bumped when the reel's audio changes. */
-export function reelAudioUrl(id: string, v?: number | string): string {
-  return `/api/reels/${id}/audio${v != null ? `?v=${v}` : ''}`
+/** Concatenated audio of the reel (one continuous WAV). `v` is a cache-busting
+ *  token bumped when the reel's audio changes. `clipIds`, when given, scopes the
+ *  audio to just those clips (a timeline page). */
+export function reelAudioUrl(
+  id: string,
+  v?: number | string,
+  clipIds?: string[],
+): string {
+  const params = new URLSearchParams()
+  if (v != null) params.set('v', String(v))
+  if (clipIds && clipIds.length) params.set('clips', clipIds.join(','))
+  const qs = params.toString()
+  return `/api/reels/${id}/audio${qs ? `?${qs}` : ''}`
 }
 
 export function videoUrl(id: string): string {
   return `/api/projects/${id}/video`
+}
+
+/** Lightweight playback proxy (falls back to the original until it's built). */
+export function proxyUrl(id: string): string {
+  return `/api/projects/${id}/proxy`
 }
 
 export function audioUrl(id: string): string {

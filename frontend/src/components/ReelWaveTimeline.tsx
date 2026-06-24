@@ -26,6 +26,7 @@ interface MenuState {
 interface Props {
   reelId: string
   clips: TimelineClip[]
+  clipIds: string[]
   activeId: string | null
   globalTime: number
   audioRev: number
@@ -53,6 +54,7 @@ const isCut = (id: string) => !isWord(id) && !isLabel(id) && !isBand(id) && id !
 export function ReelWaveTimeline({
   reelId,
   clips,
+  clipIds,
   activeId,
   globalTime,
   audioRev,
@@ -89,6 +91,7 @@ export function ReelWaveTimeline({
   const selectedRef = useRef<string | null>(null)
 
   const total = clips.reduce((a, c) => a + (c.duration || 0), 0)
+  const audioKey = clipIds.join(',') // identity of the page's audio
 
   function clipAt(t: number): TimelineClip | null {
     let target: TimelineClip | null = null
@@ -168,7 +171,7 @@ export function ReelWaveTimeline({
       cursorColor: '#5dff8f',
       cursorWidth: 2,
       autoScroll: true,
-      url: reelAudioUrl(reelId, audioRev),
+      url: reelAudioUrl(reelId, audioRev, clipIds),
       plugins: [regions],
     })
     wsRef.current = ws
@@ -285,7 +288,8 @@ export function ReelWaveTimeline({
       wsRef.current = null
       regionsRef.current = null
     }
-  }, [reelId, audioRev])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reelId, audioRev, audioKey])
 
   // (re)render regions for every clip: framed band, words, then editable cuts
   useEffect(() => {
@@ -371,9 +375,11 @@ export function ReelWaveTimeline({
     const v = videoRef.current
     if (!v || !ready) return
     let raf = 0
-    const offset = () =>
-      clipsRef.current.find((c) => c.id === activeIdRef.current)?.offset ?? 0
-    const sync = () => wsRef.current?.setTime(offset() + v.currentTime)
+    const sync = () => {
+      const c = clipsRef.current.find((cl) => cl.id === activeIdRef.current)
+      if (!c) return // active clip isn't on this page → no playhead here
+      wsRef.current?.setTime(c.offset + v.currentTime)
+    }
     const loop = () => {
       sync()
       raf = requestAnimationFrame(loop)
@@ -407,6 +413,19 @@ export function ReelWaveTimeline({
     if (!ready || playingRef.current) return
     wsRef.current?.setTime(globalTime)
   }, [globalTime, ready])
+
+  // hide the cursor when the active clip isn't on this page (you switched pages
+  // away from the playing/selected clip) — otherwise it'd sit wrongly at 0
+  useEffect(() => {
+    const ws = wsRef.current
+    if (!ws || !ready) return
+    const onPage = clips.some((c) => c.id === activeId)
+    try {
+      ws.setOptions({ cursorWidth: onPage ? 2 : 0 })
+    } catch {
+      /* not ready */
+    }
+  }, [activeId, clips, ready])
 
   // delete the selected cut (Backspace/Delete); Escape clears selection
   useEffect(() => {

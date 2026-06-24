@@ -713,3 +713,69 @@ header {
 .bad {
   color: #c0392b;
 }
+
+/* reel timeline pager */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 10px;
+}
+.pager-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  border-radius: 6px;
+}
+.pager-arrow:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.pager-label {
+  font-size: 0.85em;
+  opacity: 0.85;
+  min-width: 80px;
+}
+.page-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.page-dot {
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  background: rgba(155, 180, 208, 0.35);
+}
+.page-dot.active {
+  background: #5dff8f;
+}
+
+/* off-screen video preloaders (warm the cache for the current part) */
+.clip-preloaders {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* sidebar page-group divider */
+.clip-section {
+  list-style: none;
+  padding: 10px 6px 2px;
+  font-size: 0.68em;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.5;
+  cursor: default;
+}

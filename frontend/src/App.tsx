@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -7,6 +8,7 @@ import {
 } from 'react'
 import {
   addReelVideos,
+  buildReelProxies,
   cancelJob,
   createReel,
   editWordText,
@@ -25,7 +27,7 @@ import {
   startTranscribe,
   updateCutParams,
   updateReelCutParams,
-  videoUrl,
+  proxyUrl,
   watchJob,
   type ClipSummary,
   type CutParams,
@@ -45,6 +47,7 @@ import './App.css'
 
 const MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3']
 const REEL_KEY = 'kitcut.reelId'
+const PAGE_SIZE = 5 // clips per timeline page
 
 function App() {
   const [health, setHealth] = useState<Health | null>(null)
@@ -57,6 +60,7 @@ function App() {
   const [timeline, setTimeline] = useState<ReelTimelineData | null>(null)
   const [globalTime, setGlobalTime] = useState(0)
   const [audioRev, setAudioRev] = useState(0) // bumped when the reel audio changes
+  const [currentPage, setCurrentPage] = useState(0)
 
   // active-clip editing state
   const [project, setProject] = useState<Project | null>(null)
@@ -79,6 +83,7 @@ function App() {
   const cutTimer = useRef<number | null>(null)
   const wordTimer = useRef<number | null>(null)
   const scrubTimer = useRef<number | null>(null)
+  const editLoadTimer = useRef<number | null>(null)
   const pendingScrubTimeRef = useRef<number | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const removesRef = useRef<[number, number][]>([])
@@ -101,9 +106,33 @@ function App() {
   const pendingSeekRef = useRef<number | null>(null)
   const pendingPlayRef = useRef(false)
 
-  // remove spans (complement of kept) drive preview-skip within the active clip
+  // ---- Pagination: a "page" is a 5-clip window over the reel. The timeline +
+  // waveform render only the current page (performance); export still combines
+  // every clip. Offsets are rebased so the page's first clip sits at t=0. ----
+  const tlClips = timeline?.clips ?? []
+  const pageCount = Math.max(1, Math.ceil(tlClips.length / PAGE_SIZE))
+  const page = Math.min(currentPage, pageCount - 1)
+  // Memoized so the timeline's region effect (which depends on `clips`) only
+  // rebuilds when the page actually changes — NOT on every playback/scrub render.
+  const pageClips = useMemo(() => {
+    const all = timeline?.clips ?? []
+    const base = all[page * PAGE_SIZE]?.offset ?? 0
+    return all
+      .slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
+      .map((c) => ({ ...c, offset: c.offset - base }))
+  }, [timeline, page])
+  const pageClipIds = useMemo(() => pageClips.map((c) => c.id), [pageClips])
+  const pageClipsRef = useRef(pageClips)
+  pageClipsRef.current = pageClips
+  const tlClipsRef = useRef(tlClips)
+  tlClipsRef.current = tlClips
+
+  // remove spans (complement of kept) drive preview-skip within the active clip.
+  // Empty while the loaded editing state isn't for the active clip yet (during
+  // timeline navigation) so we never skip using another clip's cuts.
   removesRef.current = (() => {
-    const dur = project?.duration ?? 0
+    if (!project || project.id !== activeId) return []
+    const dur = project.duration ?? 0
     const out: [number, number][] = []
     let cursor = 0
     for (const [s, e] of kept) {
@@ -115,8 +144,8 @@ function App() {
   })()
 
   function activeOffset(): number {
-    const tl = timelineRef.current
-    return tl?.clips.find((c) => c.id === activeIdRef.current)?.offset ?? 0
+    // page-local offset of the active clip (0 when it's not on the current page)
+    return pageClipsRef.current.find((c) => c.id === activeIdRef.current)?.offset ?? 0
   }
 
   async function refreshTimeline() {
@@ -148,8 +177,14 @@ function App() {
         setClips(detail.clips)
         reelRef.current = detail.reel
         localStorage.setItem(REEL_KEY, detail.reel.id)
+        void buildReelProxies(detail.reel.id).catch(() => {}) // backfill any missing proxies
         await refreshTimeline()
-        if (detail.clips.length) void selectClip(detail.clips[0].id)
+        if (detail.clips.length) {
+          // restore the page the user left by selecting that page's first clip
+          const savedPage = Number(localStorage.getItem(`kitcut.page.${detail.reel.id}`)) || 0
+          const startIdx = Math.min(savedPage * PAGE_SIZE, detail.clips.length - 1)
+          goToClip(detail.clips[startIdx].id, 0)
+        }
       } catch (e) {
         setError(String(e))
       }
@@ -179,21 +214,94 @@ function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // keep the global playhead correct when offsets change (reorder) or clip switches
+  // The active clip's playback proxy may still be building. Drive the player off
+  // the proxy URL (which falls back to the original) and track readiness so we can
+  // upgrade original→proxy the moment it lands.
+  const activeClip = clips.find((c) => c.id === activeId)
+  const proxyReady = !!(activeClip?.proxy_ready ?? project?.proxy_ready)
+  const activeProxyReadyRef = useRef(proxyReady)
+  activeProxyReadyRef.current = proxyReady
+
+  // Poll while any video clip is still optimizing; stop once all proxies exist.
+  // (audio-only clips have no video to proxy, so they never count as pending)
+  const anyProxyPending = clips.some((c) => c.width != null && !c.proxy_ready)
+  useEffect(() => {
+    if (!anyProxyPending) return
+    let stop = false
+    let lastPending = Infinity
+    let noProgress = 0
+    let timer = 0
+    const tick = async () => {
+      if (stop) return
+      try {
+        const r = reelRef.current
+        if (r) {
+          const detail = await getReel(r.id)
+          if (stop) return
+          const active = detail.clips.find((c) => c.id === activeIdRef.current)
+          // preserve playhead + play state across the original→proxy upgrade remount
+          if (
+            active?.proxy_ready &&
+            activeProxyReadyRef.current === false &&
+            videoRef.current
+          ) {
+            pendingSeekRef.current = videoRef.current.currentTime
+            pendingPlayRef.current = !videoRef.current.paused
+          }
+          const pending = detail.clips.filter((c) => c.width != null && !c.proxy_ready).length
+          noProgress = pending < lastPending ? 0 : noProgress + 1
+          lastPending = pending
+          setClips(detail.clips)
+          if (pending === 0) return // all built; effect tears down via anyProxyPending
+        }
+      } catch {
+        /* best-effort: a failed proxy just keeps the original */
+      }
+      // keep polling unless builds stall (no completions for ~20 ticks / ~50s)
+      if (!stop && noProgress < 20) timer = window.setTimeout(tick, 2500)
+    }
+    timer = window.setTimeout(tick, 2500)
+    return () => {
+      stop = true
+      clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyProxyPending])
+
+  // follow the active clip: bring its page into view whenever activeId changes
+  // (click, sidebar jump, playback crossing a boundary). A *manual* page switch
+  // leaves activeId untouched, so it never auto-selects a clip.
+  useEffect(() => {
+    if (!activeId) return
+    const idx = tlClipsRef.current.findIndex((c) => c.id === activeId)
+    if (idx >= 0) setCurrentPage(Math.floor(idx / PAGE_SIZE))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId])
+
+  // clamp the page if clips were removed, and persist it per reel
+  useEffect(() => {
+    setCurrentPage((p) => Math.min(p, pageCount - 1))
+  }, [pageCount])
+  useEffect(() => {
+    if (reel) localStorage.setItem(`kitcut.page.${reel.id}`, String(currentPage))
+  }, [currentPage, reel])
+
+  // keep the playhead correct when offsets change (reorder), clip switches, or
+  // the page changes (offsets rebase to the new page)
   useEffect(() => {
     setGlobalTime(activeOffset() + (videoRef.current?.currentTime ?? 0))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeline, activeId])
+  }, [timeline, activeId, currentPage])
 
-  async function selectClip(id: string, force = false) {
-    if (!force && id === activeIdRef.current) return
-    setActiveId(id)
-    activeIdRef.current = id
-    setCurrentTime(0)
+  // Load a clip's heavy editing state (transcript + cuts). Guarded so results for
+  // a clip you've already scrubbed past are dropped.
+  async function loadEditingState(id: string) {
     try {
       const p = await getProject(id)
+      if (id !== activeIdRef.current) return
       setProject(p)
       const payload = await getCuts(id)
+      if (id !== activeIdRef.current) return
       setCutParams(payload.cut_params)
       setKept(payload.kept)
       setStats(payload.stats)
@@ -202,22 +310,32 @@ function App() {
     }
   }
 
-  // jump to a clip in the player (used by the sidebar)
-  function gotoClip(id: string, localSeek = 0) {
+  function scheduleEditingLoad(id: string) {
+    if (editLoadTimer.current) clearTimeout(editLoadTimer.current)
+    editLoadTimer.current = window.setTimeout(() => void loadEditingState(id), 250)
+  }
+
+  // Switch the player to a clip. The video swaps + seeks immediately (it's driven
+  // by activeId); the transcript/cuts load now, or — for rapid timeline
+  // navigation — after a short settle (`defer`).
+  function goToClip(id: string, localSeek = 0, defer = false) {
     if (id === activeIdRef.current) {
       const v = videoRef.current
       if (v) v.currentTime = localSeek
       return
     }
+    setActiveId(id)
+    activeIdRef.current = id
     pendingSeekRef.current = localSeek
-    void selectClip(id)
+    setCurrentTime(localSeek)
+    if (defer) scheduleEditingLoad(id)
+    else void loadEditingState(id)
   }
 
   // scrub the unified timeline -> seek the right clip at the right local time (debounced)
   function onScrub(g: number) {
-    const tl = timelineRef.current
-    if (!tl) return
-    // Immediate UI update for visual feedback
+    if (!pageClipsRef.current.length) return
+    // Immediate UI update for visual feedback (g is page-local time)
     setGlobalTime(g)
 
     // Debounce the actual seeking/clip switching
@@ -228,8 +346,9 @@ function App() {
       const time = pendingScrubTimeRef.current
       if (time === null) return
 
-      let target = tl.clips[0]
-      for (const c of tl.clips) {
+      const pc = pageClipsRef.current
+      let target = pc[0]
+      for (const c of pc) {
         if (time >= c.offset && time < c.offset + c.duration) {
           target = c
           break
@@ -242,8 +361,8 @@ function App() {
         const v = videoRef.current
         if (v) v.currentTime = local
       } else {
-        pendingSeekRef.current = local
-        void selectClip(target.id, true)
+        // defer: swap the video now, load transcript/cuts once scrubbing settles
+        goToClip(target.id, local, true)
       }
     }, 50) // 50ms debounce
   }
@@ -254,9 +373,8 @@ function App() {
     const idx = tl.clips.findIndex((c) => c.id === activeIdRef.current)
     const next = idx >= 0 ? tl.clips[idx + 1] : undefined
     if (next) {
-      pendingSeekRef.current = 0
       pendingPlayRef.current = true
-      void selectClip(next.id, true)
+      goToClip(next.id, 0)
     }
   }
 
@@ -284,7 +402,7 @@ function App() {
       setClips(detail.clips)
       await refreshTimeline()
       setAudioRev((n) => n + 1)
-      if (!activeIdRef.current && detail.clips.length) void selectClip(detail.clips[0].id)
+      if (!activeIdRef.current && detail.clips.length) goToClip(detail.clips[0].id, 0)
     } catch (e) {
       setError(String(e))
     } finally {
@@ -303,7 +421,7 @@ function App() {
       setAudioRev((n) => n + 1)
       if (activeIdRef.current === id) {
         const next = detail.clips[0]?.id ?? null
-        if (next) void selectClip(next, true)
+        if (next) goToClip(next, 0)
         else {
           setActiveId(null)
           activeIdRef.current = null
@@ -364,7 +482,7 @@ function App() {
               } catch {
                 /* ignore refresh failure */
               }
-              if (id === activeIdRef.current) await selectClip(id, true)
+              if (id === activeIdRef.current) await loadEditingState(id)
               setBusyIds((s) => s.filter((x) => x !== id))
               close()
               resolve()
@@ -572,7 +690,7 @@ function App() {
   const activeBusy = activeId ? busyIds.includes(activeId) : false
   const totals = timeline?.totals
   const activeSub =
-    subs && project
+    subs && project && project.id === activeId
       ? (() => {
           const seg = project.segments.find(
             (s) => currentTime >= s.start && currentTime < s.end,
@@ -607,7 +725,8 @@ function App() {
           activeId={activeId}
           busyIds={busyIds}
           progressMsg={progressMsg}
-          onSelect={(id) => gotoClip(id, 0)}
+          pageSize={PAGE_SIZE}
+          onSelect={(id) => goToClip(id, 0)}
           onReorder={onReorder}
           onRemove={onRemoveClip}
           onAddVideos={onAddVideos}
@@ -671,13 +790,23 @@ function App() {
                       ref={videoRef}
                       className="video"
                       controls
-                      src={videoUrl(project.id)}
-                      key={project.id}
+                      src={proxyUrl(activeId ?? project.id)}
+                      key={`${activeId ?? project.id}:${proxyReady}`}
                       onTimeUpdate={onTimeUpdate}
                       onLoadedMetadata={onVideoLoaded}
                       onEnded={onVideoEnded}
                     />
                     {activeSub && <div className="subtitle-overlay">{activeSub}</div>}
+                  </div>
+                  {/* Preload the rest of this part's clips so switching doesn't wait on
+                      the network — the main player gets them from cache on swap. Other
+                      parts cost nothing until you open them. */}
+                  <div className="clip-preloaders" aria-hidden="true">
+                    {pageClips
+                      .filter((c) => c.id !== activeId)
+                      .map((c) => (
+                        <video key={c.id} src={proxyUrl(c.id)} preload="auto" muted tabIndex={-1} />
+                      ))}
                   </div>
                   <label className="check inline cc-toggle">
                     <input
@@ -691,14 +820,18 @@ function App() {
 
                 <section className="panel pane transcript-pane">
                   <h2>Transcript</h2>
-                  <TranscriptView
-                    segments={project.segments}
-                    currentTime={currentTime}
-                    onToggleWord={toggleWord}
-                    onToggleSegment={toggleSegment}
-                    onSeek={seek}
-                    onEditWord={editWord}
-                  />
+                  {project.id === activeId ? (
+                    <TranscriptView
+                      segments={project.segments}
+                      currentTime={currentTime}
+                      onToggleWord={toggleWord}
+                      onToggleSegment={toggleSegment}
+                      onSeek={seek}
+                      onEditWord={editWord}
+                    />
+                  ) : (
+                    <p className="muted">loading transcript…</p>
+                  )}
                 </section>
               </div>
 
@@ -731,9 +864,41 @@ function App() {
                       </a>
                     </div>
                   </div>
+                  {pageCount > 1 && (
+                    <div className="pager">
+                      <button
+                        className="pager-arrow"
+                        onClick={() => setCurrentPage(Math.max(0, page - 1))}
+                        disabled={page === 0}
+                      >
+                        ‹
+                      </button>
+                      <span className="pager-label">
+                        Part {page + 1} / {pageCount}
+                      </span>
+                      <div className="page-dots">
+                        {Array.from({ length: pageCount }, (_, i) => (
+                          <button
+                            key={i}
+                            className={`page-dot${i === page ? ' active' : ''}`}
+                            onClick={() => setCurrentPage(i)}
+                            title={`Part ${i + 1}`}
+                          />
+                        ))}
+                      </div>
+                      <button
+                        className="pager-arrow"
+                        onClick={() => setCurrentPage(Math.min(pageCount - 1, page + 1))}
+                        disabled={page === pageCount - 1}
+                      >
+                        ›
+                      </button>
+                    </div>
+                  )}
                   <ReelWaveTimeline
                     reelId={timeline.reel.id}
-                    clips={timeline.clips}
+                    clips={pageClips}
+                    clipIds={pageClipIds}
                     activeId={activeId}
                     globalTime={globalTime}
                     audioRev={audioRev}

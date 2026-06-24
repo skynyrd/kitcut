@@ -80,6 +80,21 @@ def start_timecode(path: Path) -> str | None:
     return None
 
 
+def video_frame_count(path: Path) -> int | None:
+    """Exact number of video frames from stream metadata. The container/format
+    duration can run longer than the video stream (audio padding, DJI &c.), so a
+    frame count derived from it over-declares and trips FCP's 'no respective
+    media'. Returns None when the stream doesn't report a usable count."""
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=nb_frames",
+        "-of", "default=nw=1:nk=1", str(path),
+    ]
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    val = out.stdout.strip()
+    return int(val) if val.isdigit() and int(val) > 0 else None
+
+
 def extract_audio(src: Path, dst: Path, sample_rate: int = 16000) -> Path:
     """Extract mono PCM WAV suitable for Whisper + silence analysis."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -96,6 +111,38 @@ def extract_audio(src: Path, dst: Path, sample_rate: int = 16000) -> Path:
     out = subprocess.run(cmd, capture_output=True, text=True)
     if out.returncode != 0:
         raise FFmpegError(out.stderr.strip() or "ffmpeg audio extraction failed")
+    return dst
+
+
+def build_proxy(src: Path, dst: Path, height: int = 720, bitrate: str = "4M") -> Path:
+    """Build a lightweight preview proxy: 8-bit H.264 + AAC in a 16:9 box of the
+    given height, faststart, with a keyframe every 0.5s for snappy scrubbing.
+
+    Hardware-encoded via VideoToolbox so a 4K 10-bit HEVC source transcodes in
+    seconds. Preview-only — export still references the camera original."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    box_w = round(height * 16 / 9)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(src),
+        "-map", "0:v:0",
+        "-map", "0:a:0?",  # '?' → don't fail when the source has no audio
+        "-dn",  # drop mapped data streams
+        "-write_tmcd", "0",  # stop the mp4 muxer synthesizing an iPhone timecode track
+        "-vf", f"scale={box_w}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+        "-c:v", "h264_videotoolbox",
+        "-b:v", bitrate,
+        "-pix_fmt", "yuv420p",
+        "-force_key_frames", "expr:gte(t,n_forced*0.5)",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(dst),
+    ]
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise FFmpegError(out.stderr.strip() or "ffmpeg proxy build failed")
     return dst
 
 

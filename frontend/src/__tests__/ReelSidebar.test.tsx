@@ -15,6 +15,7 @@ describe("ReelSidebar Component", () => {
       status: "transcribed",
       language: "en",
       transcribed: true,
+      proxy_ready: true,
     },
     {
       id: "clip-2",
@@ -26,6 +27,7 @@ describe("ReelSidebar Component", () => {
       status: "created",
       language: null,
       transcribed: false,
+      proxy_ready: false,
     },
   ];
 
@@ -34,6 +36,7 @@ describe("ReelSidebar Component", () => {
     activeId: "clip-1",
     busyIds: [],
     progressMsg: "",
+    pageSize: 5,
     onSelect: vi.fn(),
     onReorder: vi.fn(),
     onRemove: vi.fn(),

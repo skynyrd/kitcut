@@ -30,6 +30,10 @@ def audio_path(project_id: str) -> Path:
     return project_dir(project_id) / "audio.wav"
 
 
+def proxy_path(project_id: str) -> Path:
+    return project_dir(project_id) / "proxy.mp4"
+
+
 def find_source(project_id: str) -> Path | None:
     d = project_dir(project_id)
     if not d.exists():
@@ -93,13 +97,16 @@ def reel_json_path(reel_id: str) -> Path:
     return REELS_DIR / f"{reel_id}.json"
 
 
-def reel_audio_path(reel_id: str) -> Path:
-    return REELS_DIR / f"{reel_id}.audio.wav"
+def reel_audio_path(reel_id: str, key: str = "") -> Path:
+    suffix = f".{key}" if key else ""
+    return REELS_DIR / f"{reel_id}{suffix}.audio.wav"
 
 
-def reel_audio_meta_path(reel_id: str) -> Path:
-    """Sidecar fingerprint of the inputs the cached reel audio was built from."""
-    return REELS_DIR / f"{reel_id}.audio.json"
+def reel_audio_meta_path(reel_id: str, key: str = "") -> Path:
+    """Sidecar fingerprint of the inputs the cached reel audio was built from.
+    `key` distinguishes per-page subsets from the whole-reel audio (key="")."""
+    suffix = f".{key}" if key else ""
+    return REELS_DIR / f"{reel_id}{suffix}.audio.json"
 
 
 def save_reel(reel: Reel) -> None:

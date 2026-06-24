@@ -124,7 +124,18 @@ def build_fcpxml(
         t0, drop = _timecode_frames(tc, max(1, round(fps)))
     else:
         t0, drop = 0, False
+    # Drop-frame timecode only exists for 29.97/59.94. DJI &c. report a slightly
+    # off fps (e.g. 29.939) that would otherwise format as 30 NDF and make FCP
+    # reject tcFormat="DF". Trust the timecode and use the true DF frame rate.
+    if drop:
+        fd = (1001, 60000) if round(fps) >= 50 else (1001, 30000)
     tcfmt = "DF" if drop else "NDF"
+    # Use the video stream's true frame count — the container duration can be
+    # longer (audio padding), which over-declares frames and makes FCP reject
+    # edits that reach past the last real frame ("no respective media").
+    asset_dur_frames = ffmpeg_utils.video_frame_count(source_path) or int(
+        duration * fd[1] / fd[0]
+    )
 
     kept = cutlib.project_kept(project)
     if not kept:
@@ -140,7 +151,8 @@ def build_fcpxml(
     style_id = 0
     for i, (s, e) in enumerate(kept):
         in_frames = _to_frames(s, fd)
-        len_frames = _to_frames(e - s, fd)
+        # clamp so the source range can't run past the asset's media
+        len_frames = min(_to_frames(e - s, fd), asset_dur_frames - in_frames)
         if len_frames <= 0:
             continue
         open_tag = (
@@ -171,7 +183,7 @@ def build_fcpxml(
     spine = "\n".join(clips)
 
     asset_start = _tf(t0, fd)
-    asset_dur = _tf(_to_frames(duration, fd), fd)
+    asset_dur = _tf(asset_dur_frames, fd)
     effect_res = (
         '    <effect id="r3" name="Basic Title" '
         'uid=".../Titles.localized/Bumper:Opener.localized/'
@@ -229,8 +241,12 @@ def build_reel_fcpxml(
         raise ValueError("reel has no videos to export")
 
     use_title = subtitle_mode == "title"
-    first_clip = clips[0][0]
-    seq_fd = _frame_duration(first_clip.fps or 25.0)
+    first_clip, first_src = clips[0]
+    seq_fps = first_clip.fps or 25.0
+    seq_fd = _frame_duration(seq_fps)
+    _tc0 = ffmpeg_utils.start_timecode(first_src)
+    if _tc0 and ";" in _tc0:  # drop-frame → true 29.97/59.94 grid (matches format f0)
+        seq_fd = (1001, 60000) if round(seq_fps) >= 50 else (1001, 30000)
     seq_audio_rate = first_clip.audio_rate or 48000
 
     resources: list[str] = []
@@ -253,8 +269,13 @@ def build_reel_fcpxml(
             t0, drop = _timecode_frames(tc, max(1, round(fps)))
         else:
             t0, drop = 0, False
+        if drop:  # see build_fcpxml: DF formats must use the true 29.97/59.94 rate
+            fd = (1001, 60000) if round(fps) >= 50 else (1001, 30000)
         tcfmt = "DF" if drop else "NDF"
         t0_sec = t0 * fd[0] / fd[1]
+        asset_dur_frames = ffmpeg_utils.video_frame_count(src) or int(
+            duration * fd[1] / fd[0]
+        )  # true video frames; see build_fcpxml
         if idx == 0:
             seq_tcfmt = tcfmt
 
@@ -266,7 +287,7 @@ def build_reel_fcpxml(
             f'frameDuration="{fd[0]}/{fd[1]}s" width="{width}" height="{height}" '
             'colorSpace="1-1-1 (Rec. 709)"/>\n'
             f'    <asset id="{asset_id}" name="{name}" start="{_tf(t0, fd)}" '
-            f'duration="{_tf(_to_frames(duration, fd), fd)}" hasVideo="1" hasAudio="1" '
+            f'duration="{_tf(asset_dur_frames, fd)}" hasVideo="1" hasAudio="1" '
             f'format="{fmt_id}" audioSources="1" audioChannels="2" '
             f'audioRate="{audio_rate}">\n'
             f'      <media-rep kind="original-media" src="{src_url}"/>\n'
@@ -276,11 +297,13 @@ def build_reel_fcpxml(
         kept = cutlib.project_kept(clip) or [(0.0, duration)]
         ci = 0
         for s, e in kept:
-            len_frames = _to_frames(e - s, seq_fd)
+            in_frames = _to_frames(s, fd)
+            # clamp so the source range can't run past the asset's media (rounding
+            # can push the last kept interval ~1 frame over → FCP "no respective media")
+            len_frames = min(_to_frames(e - s, seq_fd), asset_dur_frames - in_frames)
             if len_frames <= 0:
                 continue
             ci += 1
-            in_frames = _to_frames(s, fd)
             open_tag = (
                 f'          <asset-clip ref="{asset_id}" name="{name} {ci}" '
                 f'offset="{_tf(pos, seq_fd)}" start="{_tf(t0 + in_frames, fd)}" '

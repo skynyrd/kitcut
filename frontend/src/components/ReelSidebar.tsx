@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { ClipSummary } from '../api'
 
 interface Props {
@@ -6,6 +6,7 @@ interface Props {
   activeId: string | null
   busyIds: string[]
   progressMsg: string
+  pageSize: number
   onSelect: (id: string) => void
   onReorder: (clipIds: string[]) => void
   onRemove: (id: string) => void
@@ -25,6 +26,7 @@ export function ReelSidebar({
   activeId,
   busyIds,
   progressMsg,
+  pageSize,
   onSelect,
   onReorder,
   onRemove,
@@ -73,8 +75,13 @@ export function ReelSidebar({
 
       <ol className="clip-list">
         {clips.map((c, i) => (
+          <Fragment key={c.id}>
+            {i % pageSize === 0 && clips.length > pageSize && (
+              <li className="clip-section" aria-hidden="true">
+                Part {Math.floor(i / pageSize) + 1}
+              </li>
+            )}
           <li
-            key={c.id}
             className={
               'clip-item' +
               (c.id === activeId ? ' active' : '') +
@@ -101,6 +108,7 @@ export function ReelSidebar({
               </span>
               <span className="clip-sub">
                 {c.duration != null ? `${c.duration.toFixed(1)}s` : '—'} · {statusText(c)}
+                {c.width != null && !c.proxy_ready && ' · optimizing…'}
               </span>
             </span>
             <button
@@ -114,6 +122,7 @@ export function ReelSidebar({
               ×
             </button>
           </li>
+          </Fragment>
         ))}
         {!clips.length && <li className="muted clip-empty">No videos yet.</li>}
       </ol>

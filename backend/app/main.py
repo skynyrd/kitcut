@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import subprocess
@@ -142,6 +143,48 @@ def _create_clip_from_path(file_path: str, reel_id: str | None = None) -> Projec
     return project
 
 
+# ---- Playback proxies: lightweight 720p copies the browser can scrub smoothly ----
+
+_proxy_sem = asyncio.Semaphore(1)  # serialize encodes so "build N proxies" ≠ N concurrent ffmpegs
+_proxy_inflight: set[str] = set()  # clips currently building, to de-dup enqueues
+
+
+def _build_proxy_blocking(project_id: str) -> None:
+    """Build the proxy under a temp name, then atomically publish it, so the
+    `/proxy` endpoint never serves a half-written file."""
+    src = storage.find_source(project_id)
+    if src is None:
+        return
+    final = storage.proxy_path(project_id)
+    tmp = final.with_name("proxy.building.mp4")
+    ffmpeg_utils.build_proxy(src, tmp)
+    tmp.replace(final)
+
+
+async def _schedule_proxy(project_id: str) -> None:
+    """Background proxy build, serialized by `_proxy_sem`. Best-effort: on failure
+    the player just keeps using the original via the `/proxy` fallback."""
+    try:
+        async with _proxy_sem:
+            await asyncio.to_thread(_build_proxy_blocking, project_id)
+    except Exception as exc:  # noqa: BLE001 - proxy is optional, never fatal
+        print(f"proxy build failed for {project_id}: {exc}")
+    finally:
+        _proxy_inflight.discard(project_id)
+
+
+def _enqueue_proxy(project_id: str) -> None:
+    """Schedule a background proxy build, unless one already exists, is already
+    running, or the clip has no video stream to downscale."""
+    if storage.proxy_path(project_id).exists() or project_id in _proxy_inflight:
+        return
+    p = storage.load_project(project_id)
+    if p is None or p.width is None:  # missing clip or audio-only → nothing to proxy
+        return
+    _proxy_inflight.add(project_id)
+    asyncio.create_task(_schedule_proxy(project_id))
+
+
 @app.post("/api/projects")
 async def create_project(file: UploadFile) -> Project:
     return _create_clip(file)
@@ -175,6 +218,7 @@ def _clip_summary(p: Project) -> dict:
         "status": p.status.value,
         "language": p.language,
         "transcribed": bool(p.segments),
+        "proxy_ready": storage.proxy_path(p.id).exists(),
     }
 
 
@@ -220,6 +264,23 @@ def get_reel(reel_id: str) -> dict:
     return _reel_detail(_require_reel(reel_id))
 
 
+@app.post("/api/reels/{reel_id}/build-proxies")
+async def build_reel_proxies(reel_id: str) -> dict:
+    """Backfill: enqueue background proxy builds for every clip that lacks one
+    (e.g. clips added before proxies existed). De-duped and serialized."""
+    reel = _require_reel(reel_id)
+    for cid in reel.clip_ids:
+        _enqueue_proxy(cid)
+    pending = sum(
+        1
+        for cid in reel.clip_ids
+        if (p := storage.load_project(cid)) is not None
+        and p.width is not None
+        and not storage.proxy_path(cid).exists()
+    )
+    return {"pending": pending}
+
+
 @app.get("/api/reels/{reel_id}/timeline")
 def get_reel_timeline(reel_id: str) -> dict:
     reel = _require_reel(reel_id)
@@ -240,20 +301,33 @@ def _audio_fingerprint(clip_ids: list[str]) -> list[list]:
 
 
 @app.get("/api/reels/{reel_id}/audio")
-def get_reel_audio(reel_id: str) -> FileResponse:
-    """One continuous WAV of every clip's audio, concatenated in running order.
+def get_reel_audio(reel_id: str, clips: str | None = None) -> FileResponse:
+    """One continuous WAV of the reel's clip audio, concatenated in running order.
 
-    Rebuilt only when the input fingerprint changes; the unified-timeline
-    waveform loads this single file."""
+    With `?clips=id1,id2,…` only those clips (a timeline page) are concatenated —
+    each subset is cached under its own key. Rebuilt only when the input
+    fingerprint changes; the unified-timeline waveform loads this single file."""
     reel = _require_reel(reel_id)
-    clip_ids = [cid for cid in reel.clip_ids if storage.load_project(cid) is not None]
+    # filter to the requested subset (if any), preserving reel running order
+    requested = set(clips.split(",")) if clips else None
+    clip_ids = [
+        cid
+        for cid in reel.clip_ids
+        if storage.load_project(cid) is not None
+        and (requested is None or cid in requested)
+    ]
     if not clip_ids:
         raise HTTPException(status_code=404, detail="reel has no audio")
 
     parts = [_ensure_audio(cid) for cid in clip_ids]
     fp = _audio_fingerprint(clip_ids)
-    out = storage.reel_audio_path(reel_id)
-    meta = storage.reel_audio_meta_path(reel_id)
+    key = (
+        ""
+        if requested is None
+        else hashlib.sha1(",".join(clip_ids).encode()).hexdigest()[:10]
+    )
+    out = storage.reel_audio_path(reel_id, key)
+    meta = storage.reel_audio_meta_path(reel_id, key)
 
     cached_fp = None
     if out.exists() and meta.exists():
@@ -274,17 +348,19 @@ async def add_reel_videos(reel_id: str, files: list[UploadFile] = File(...)) -> 
     for f in files:
         clip = _create_clip(f, reel_id=reel_id)
         reel.clip_ids.append(clip.id)
+        _enqueue_proxy(clip.id)
     storage.save_reel(reel)
     return _reel_detail(reel)
 
 
 @app.post("/api/reels/{reel_id}/videos/from-paths")
-def add_reel_videos_from_paths(reel_id: str, body: AddVideoPaths) -> dict:
+async def add_reel_videos_from_paths(reel_id: str, body: AddVideoPaths) -> dict:
     """Add videos from existing file paths (creates symlinks, no copying)."""
     reel = _require_reel(reel_id)
     for path in body.paths:
         clip = _create_clip_from_path(path, reel_id=reel_id)
         reel.clip_ids.append(clip.id)
+        _enqueue_proxy(clip.id)
     storage.save_reel(reel)
     return _reel_detail(reel)
 
@@ -332,12 +408,28 @@ def update_reel_cut_params(reel_id: str, params: CutParams, apply: str = "all") 
 
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str) -> Project:
-    return _require_project(project_id)
+    project = _require_project(project_id)
+    project.proxy_ready = storage.proxy_path(project_id).exists()
+    return project
 
 
 @app.get("/api/projects/{project_id}/video")
 def get_video(project_id: str) -> FileResponse:
     _require_project(project_id)
+    src = storage.find_source(project_id)
+    if src is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    return FileResponse(src)
+
+
+@app.get("/api/projects/{project_id}/proxy")
+def get_proxy(project_id: str) -> FileResponse:
+    """Serve the lightweight playback proxy if built, else fall back to the
+    original source so the player always has something to show."""
+    _require_project(project_id)
+    proxy = storage.proxy_path(project_id)
+    if proxy.exists():
+        return FileResponse(proxy)
     src = storage.find_source(project_id)
     if src is None:
         raise HTTPException(status_code=404, detail="source not found")
@@ -567,7 +659,7 @@ def reset_transcription(project_id: str) -> Project:
     if project_path.exists():
         # Delete extracted audio and other non-source artifacts
         for f in project_path.glob("*"):
-            if not f.name.startswith("source"):
+            if not (f.name.startswith("source") or f.name.startswith("proxy")):
                 if f.is_file():
                     f.unlink()
                 elif f.is_dir():

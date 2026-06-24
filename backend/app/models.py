@@ -90,6 +90,7 @@ class Project(BaseModel):
     height: int | None = None
     fps: float | None = None
     audio_rate: int | None = None
+    proxy_ready: bool = False  # populated on read from proxy.mp4 existence (preview-only)
     language: str | None = None
     aligned: bool = False
     align_error: str | None = None
