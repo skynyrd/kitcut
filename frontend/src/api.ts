@@ -271,6 +271,21 @@ export async function getReel(id: string): Promise<ReelDetail> {
   return res.json()
 }
 
+export async function renameReel(id: string, name: string): Promise<ReelDetail> {
+  const res = await fetch(`/api/reels/${id}/name`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) throw new Error(`rename reel failed: ${res.status}`)
+  return res.json()
+}
+
+export async function deleteReel(id: string): Promise<void> {
+  const res = await fetch(`/api/reels/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`delete reel failed: ${res.status}`)
+}
+
 /** Backfill: ask the backend to build proxies for any clips that lack one. */
 export async function buildReelProxies(id: string): Promise<{ pending: number }> {
   const res = await fetch(`/api/reels/${id}/build-proxies`, { method: 'POST' })

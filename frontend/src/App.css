@@ -300,6 +300,172 @@ header {
   border: 1px solid currentColor;
 }
 
+/* project (reel) switcher */
+.reel-switcher {
+  position: relative;
+}
+
+.reel-switcher-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 280px;
+  padding: 5px 12px;
+  background: #16202c;
+  border: 1px solid #2a3a4a;
+  border-radius: 8px;
+  color: #e6edf3;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.reel-switcher-trigger:hover {
+  border-color: #3a5170;
+}
+
+.reel-switcher-trigger .rs-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reel-switcher-trigger .rs-caret {
+  opacity: 0.6;
+  font-size: 0.7rem;
+}
+
+.reel-switcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 260px;
+  background: #16202c;
+  border: 1px solid #2a3a4a;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px #000a;
+  padding: 4px;
+}
+
+.rs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.rs-item {
+  display: flex;
+  align-items: center;
+}
+
+.rs-pick {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: #e6edf3;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.rs-pick:hover,
+.rs-item.active .rs-pick {
+  background: #1f2c3b;
+}
+
+.rs-check {
+  width: 12px;
+  color: #5dff8f;
+  flex: 0 0 auto;
+}
+
+.rs-item-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rs-count {
+  flex: 0 0 auto;
+  opacity: 0.55;
+  font-size: 0.75rem;
+}
+
+.rs-edit {
+  flex: 1 1 auto;
+  margin: 4px 8px;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 4px 6px;
+  background: #0d1620;
+  border: 1px solid #3a5170;
+  border-radius: 4px;
+  color: #e6edf3;
+}
+
+.rs-ico {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: #e6edf3;
+  opacity: 0.45;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 6px;
+}
+
+.rs-ico:hover {
+  opacity: 1;
+  background: #1f2c3b;
+}
+
+.rs-del:hover {
+  opacity: 1;
+  background: #c0392b;
+  color: #fff;
+}
+
+.rs-empty {
+  padding: 8px;
+  opacity: 0.5;
+  font-size: 0.82rem;
+}
+
+.rs-new {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  background: none;
+  border: none;
+  border-top: 1px solid #2a3a4a;
+  color: #5dff8f;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.85rem;
+  border-radius: 0 0 6px 6px;
+}
+
+.rs-new:hover {
+  background: #1f2c3b;
+}
+
+.rs-new-input {
+  display: block;
+  width: auto;
+  margin: 6px 6px 4px;
+}
+
 .panel {
   margin: 16px 0;
   padding: 16px 18px;

@@ -389,6 +389,27 @@ def remove_reel_video(reel_id: str, clip_id: str, delete_media: bool = False) ->
     return _reel_detail(reel)
 
 
+class ReelRename(BaseModel):
+    name: str
+
+
+@app.put("/api/reels/{reel_id}/name")
+def rename_reel(reel_id: str, body: ReelRename) -> dict:
+    reel = _require_reel(reel_id)
+    reel.name = body.name.strip() or reel.name
+    storage.save_reel(reel)
+    return _reel_detail(reel)
+
+
+@app.delete("/api/reels/{reel_id}")
+def delete_reel(reel_id: str) -> dict:
+    """Delete a project (reel) and all its clips' workspace files. The user's
+    external originals are never touched (only symlinks are unlinked)."""
+    _require_reel(reel_id)
+    storage.delete_reel(reel_id)
+    return {"ok": True}
+
+
 @app.put("/api/reels/{reel_id}/cut-params")
 def update_reel_cut_params(reel_id: str, params: CutParams, apply: str = "all") -> dict:
     """Set the reel default. With apply=all, push it to every clip and recompute.

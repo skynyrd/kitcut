@@ -11,6 +11,7 @@ import {
   buildReelProxies,
   cancelJob,
   createReel,
+  deleteReel,
   editWordText,
   fcpxmlUrl,
   getCuts,
@@ -18,8 +19,10 @@ import {
   getProject,
   getReel,
   getReelTimeline,
+  listReels,
   reelFcpxmlUrl,
   removeReelVideo,
+  renameReel,
   reorderReel,
   replaceCuts,
   resetTranscription,
@@ -41,6 +44,7 @@ import {
   type ReelTimeline as ReelTimelineData,
 } from './api'
 import { ReelSidebar } from './components/ReelSidebar'
+import { ReelSwitcher } from './components/ReelSwitcher'
 import { ReelWaveTimeline } from './components/ReelWaveTimeline'
 import { SilenceControls } from './components/SilenceControls'
 import { TranscriptView } from './components/TranscriptView'
@@ -55,6 +59,7 @@ function App() {
 
   // reel state
   const [reel, setReel] = useState<Reel | null>(null)
+  const [reels, setReels] = useState<Reel[]>([]) // all projects, for the switcher
   const [clips, setClips] = useState<ClipSummary[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [busyIds, setBusyIds] = useState<string[]>([])
@@ -163,6 +168,83 @@ function App() {
     }
   }
 
+  // Open a reel: swap in its clips/timeline/player and persist it as the active
+  // project. Shared by bootstrap, the switcher, and post-create/-delete flows.
+  async function openReel(detail: ReelDetail) {
+    setReel(detail.reel)
+    setClips(detail.clips)
+    reelRef.current = detail.reel
+    localStorage.setItem(REEL_KEY, detail.reel.id)
+    clipMutation.current += 1 // drop any in-flight proxy poll from the previous reel
+    void buildReelProxies(detail.reel.id).catch(() => {}) // backfill any missing proxies
+    await refreshTimeline()
+    if (detail.clips.length) {
+      // restore the page the user left by selecting that page's first clip
+      const savedPage = Number(localStorage.getItem(`kitcut.page.${detail.reel.id}`)) || 0
+      const startIdx = Math.min(savedPage * PAGE_SIZE, detail.clips.length - 1)
+      goToClip(detail.clips[startIdx].id, 0)
+    } else {
+      setCurrentPage(0)
+      setActiveId(null)
+      activeIdRef.current = null
+      setProject(null)
+    }
+  }
+
+  async function refreshReels() {
+    try {
+      setReels(await listReels())
+    } catch {
+      /* best-effort: the switcher just shows the last-known list */
+    }
+  }
+
+  async function switchReel(id: string) {
+    if (id === reelRef.current?.id) return
+    try {
+      await openReel(await getReel(id))
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  async function newProject(name: string) {
+    try {
+      await openReel(await createReel(name.trim() || undefined))
+      await refreshReels()
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  async function renameProject(id: string, name: string) {
+    try {
+      const detail = await renameReel(id, name)
+      if (id === reelRef.current?.id) {
+        setReel(detail.reel)
+        reelRef.current = detail.reel
+      }
+      await refreshReels()
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  async function removeProject(id: string) {
+    try {
+      await deleteReel(id)
+      const rest = await listReels()
+      setReels(rest)
+      if (id === reelRef.current?.id) {
+        // deleted the open project → land on another, or a fresh empty one
+        await openReel(rest.length ? await getReel(rest[0].id) : await createReel())
+        if (!rest.length) await refreshReels()
+      }
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
   // bootstrap: health + open or create a reel
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth(null))
@@ -178,22 +260,13 @@ function App() {
           }
         }
         if (!detail) detail = await createReel()
-        setReel(detail.reel)
-        setClips(detail.clips)
-        reelRef.current = detail.reel
-        localStorage.setItem(REEL_KEY, detail.reel.id)
-        void buildReelProxies(detail.reel.id).catch(() => {}) // backfill any missing proxies
-        await refreshTimeline()
-        if (detail.clips.length) {
-          // restore the page the user left by selecting that page's first clip
-          const savedPage = Number(localStorage.getItem(`kitcut.page.${detail.reel.id}`)) || 0
-          const startIdx = Math.min(savedPage * PAGE_SIZE, detail.clips.length - 1)
-          goToClip(detail.clips[startIdx].id, 0)
-        }
+        await openReel(detail)
+        await refreshReels()
       } catch (e) {
         setError(String(e))
       }
     })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Spacebar toggles play/pause anywhere (except while typing in a field)
@@ -757,6 +830,14 @@ function App() {
     <main className="app">
       <header>
         <h1>kitcut</h1>
+        <ReelSwitcher
+          reels={reels}
+          activeId={reel?.id ?? null}
+          onSwitch={switchReel}
+          onCreate={newProject}
+          onRename={renameProject}
+          onDelete={removeProject}
+        />
         <span className={`badge ${health?.ffmpeg ? 'good' : 'bad'}`}>
           {health?.ffmpeg ? 'backend ok' : 'backend down'}
         </span>

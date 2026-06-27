@@ -61,9 +61,16 @@ def uploads_path(filename: str) -> Path:
 
 
 def delete_project(project_id: str) -> None:
+    """Remove kitcut's working files for a clip: its media dir and the upload copy
+    (if it was uploaded). `rmtree` only unlinks the `source.*` symlink, so the
+    user's external original — whether the upload-dir copy's source or a
+    from-paths target on disk — is never followed/deleted."""
     d = project_dir(project_id)
     if d.exists():
         shutil.rmtree(d)
+    if UPLOADS_DIR.exists():
+        for f in UPLOADS_DIR.glob(f"{project_id}.*"):
+            f.unlink(missing_ok=True)
 
 
 def save_project(project: Project) -> None:
@@ -129,7 +136,24 @@ def list_reels() -> list[Reel]:
         return []
     reels: list[Reel] = []
     for child in REELS_DIR.glob("*.json"):
+        # skip audio-meta sidecars (`<reel_id>[.<key>].audio.json`)
+        if child.name.endswith(".audio.json"):
+            continue
         reel = load_reel(child.stem)
         if reel is not None:
             reels.append(reel)
     return reels
+
+
+def delete_reel(reel_id: str) -> None:
+    """Delete a reel and all of its clips' working files. Originals outside the
+    workspace are untouched (see `delete_project`). The `{reel_id}.` glob (note the
+    dot) clears the reel json + cached audio sidecars without matching a different
+    reel whose id merely shares this one's prefix."""
+    reel = load_reel(reel_id)
+    if reel is not None:
+        for cid in reel.clip_ids:
+            delete_project(cid)
+    if REELS_DIR.exists():
+        for f in REELS_DIR.glob(f"{reel_id}.*"):
+            f.unlink(missing_ok=True)

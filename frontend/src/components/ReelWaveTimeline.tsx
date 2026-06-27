@@ -332,25 +332,21 @@ export function ReelWaveTimeline({
         if (lab.element) lab.element.style.pointerEvents = 'none'
       }
 
-      // Only show word regions when zoomed in AND visible in viewport
-      if (showDetails) {
-        c.word_cuts.forEach((w, i) => {
-          const regionStart = c.offset + w.start
-          const regionEnd = c.offset + w.end
-          // Phase 8.3: Viewport-based rendering - skip invisible regions
-          if (isRegionVisible(regionStart, regionEnd)) {
-            const wr = regions.addRegion({
-              id: `${c.id}::word-${i}`,
-              start: regionStart,
-              end: regionEnd,
-              color: WORD_COLOR,
-              drag: false,
-              resize: false,
-            })
-            if (wr.element) wr.element.style.pointerEvents = 'none'
-          }
+      // Transcript (word) cuts — always rendered (no viewport cull), at every zoom
+      // level like the silence cuts below. They're few (merged spans), and the
+      // viewport cull keys off wavesurfer's inner scroll which `el.scrollLeft`
+      // can't see — so culling here would wrongly hide cuts once zoomed in.
+      c.word_cuts.forEach((w, i) => {
+        const wr = regions.addRegion({
+          id: `${c.id}::word-${i}`,
+          start: c.offset + w.start,
+          end: c.offset + w.end,
+          color: WORD_COLOR,
+          drag: false,
+          resize: false,
         })
-      }
+        if (wr.element) wr.element.style.pointerEvents = 'none'
+      })
       for (const cut of c.cuts) {
         const cutStart = c.offset + cut.start
         const cutEnd = c.offset + cut.end
