@@ -81,6 +81,7 @@ export interface Project {
   error: string | null
   segments: Segment[]
   silences: unknown[]
+  cuts: CutRegion[]
   cut_params: CutParams
 }
 

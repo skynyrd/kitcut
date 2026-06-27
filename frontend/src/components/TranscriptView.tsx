@@ -1,10 +1,25 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { Segment } from '../api'
+
+/** A non-speech span in the transcript (between lines, or head/tail). `cut` is its
+ *  current net state derived from `kept`. */
+export type Gap = { start: number; end: number; cut: boolean }
+
+export interface TranscriptGaps {
+  head: Gap | null
+  after: Record<number, Gap> // keyed by the preceding segment id; last one is the tail
+}
+
+const GAP_SUBTLE = 1.0 // s — shorter gaps render as a thin, muted row
 
 function fmt(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+function gapLen(s: number): string {
+  return s >= 60 ? fmt(s) : `${s.toFixed(1)}s`
 }
 
 function lead(text: string): string {
@@ -13,20 +28,24 @@ function lead(text: string): string {
 
 interface Props {
   segments: Segment[]
+  gaps: TranscriptGaps
   currentTime: number
   onToggleWord: (segId: number, idx: number) => void
   onToggleSegment: (segId: number, removed: boolean) => void
   onToggleHiddenSegment: (segId: number, hidden: boolean) => void
+  onToggleGap: (start: number, end: number, cut: boolean) => void
   onSeek: (t: number) => void
   onEditWord: (segId: number, idx: number, text: string) => void
 }
 
 export function TranscriptView({
   segments,
+  gaps,
   currentTime,
   onToggleWord,
   onToggleSegment,
   onToggleHiddenSegment,
+  onToggleGap,
   onSeek,
   onEditWord,
 }: Props) {
@@ -77,6 +96,28 @@ export function TranscriptView({
     setEditing(null)
   }
 
+  function gapRow(gap: Gap, key: string) {
+    const len = gap.end - gap.start
+    return (
+      <div
+        key={key}
+        className={'gap-row' + (len < GAP_SUBTLE ? ' subtle' : '') + (gap.cut ? ' cut' : '')}
+      >
+        <button className="ts seek" title="seek here" onClick={() => onSeek(gap.start)}>
+          {fmt(gap.start)}
+        </button>
+        <span className="gap-label">{gapLen(len)} {gap.cut ? 'cut' : 'silence'}</span>
+        <button
+          className="seg-action gap-action"
+          onClick={() => onToggleGap(gap.start, gap.end, gap.cut)}
+          title={gap.cut ? 'restore this silence' : 'cut this silence'}
+        >
+          {gap.cut ? 'restore' : 'cut'}
+        </button>
+      </div>
+    )
+  }
+
   if (!segments.length) {
     return <p className="muted">No transcript yet.</p>
   }
@@ -87,11 +128,14 @@ export function TranscriptView({
         Click a word to cut it · double-click to edit text · click the time to seek ·
         “cut” trims the video, “remove” drops only the text
       </p>
+      {gaps.head && gapRow(gaps.head, 'gap-head')}
       {segments.map((seg) => {
         const allRemoved = seg.words.length > 0 && seg.words.every((w) => w.removed)
         const allHidden = seg.words.length > 0 && seg.words.every((w) => w.hidden)
+        const after = gaps.after[seg.id]
         return (
-          <p key={seg.id} className="segment">
+          <Fragment key={seg.id}>
+          <p className="segment">
             <button
               className="ts seek"
               title="seek here"
@@ -159,6 +203,8 @@ export function TranscriptView({
               {allHidden ? 'restore' : 'remove'}
             </button>
           </p>
+          {after && gapRow(after, `gap-${seg.id}`)}
+          </Fragment>
         )
       })}
     </div>

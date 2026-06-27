@@ -812,6 +812,53 @@ header {
   text-decoration: underline;
 }
 
+/* non-speech gap rows between transcript lines (and head/tail) */
+.gap-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 3px 0;
+}
+
+.gap-label {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  opacity: 0.7;
+  color: #8fb0c9;
+}
+
+.gap-label::before,
+.gap-label::after {
+  content: '';
+  flex: 1;
+  border-top: 1px dashed #8fb0c955;
+}
+
+.gap-row.subtle {
+  opacity: 0.55;
+}
+
+.gap-row.subtle .gap-label {
+  font-size: 0.66rem;
+}
+
+.gap-row.cut .gap-label {
+  color: #e07a7a;
+}
+
+.gap-row.cut .gap-label::before,
+.gap-row.cut .gap-label::after {
+  border-color: #e07a7a55;
+}
+
+.gap-action {
+  flex: 0 0 auto;
+}
+
 .segment-text {
   flex: 1 1 auto;
 }

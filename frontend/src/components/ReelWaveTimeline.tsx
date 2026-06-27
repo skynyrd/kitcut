@@ -48,6 +48,22 @@ const isLabel = (id: string) => id.startsWith('label::')
 const isBand = (id: string) => id.startsWith('band::')
 const isCut = (id: string) => !isWord(id) && !isLabel(id) && !isBand(id) && id !== 'pending'
 
+const SNAP_PX = 7 // magnet radius for manual-cut edges, in pixels
+
+/** Snap `value` to the nearest of `targets` within `threshold`; else return `value`. */
+export function nearestSnap(value: number, targets: number[], threshold: number): number {
+  let best = value
+  let bestDist = threshold
+  for (const t of targets) {
+    const d = Math.abs(t - value)
+    if (d <= bestDist) {
+      bestDist = d
+      best = t
+    }
+  }
+  return best
+}
+
 /** Unified reel timeline: one waveform of the whole reel (concatenated clip
  *  audio). Every clip sits in a framed band; its cut + word regions are placed
  *  at the global offset. Cut regions are editable and route back to their clip. */
@@ -84,8 +100,16 @@ export function ReelWaveTimeline({
   onCutsRef.current = onClipCutsChange
   const onRemoveClipRef = useRef(onRemoveClip)
   onRemoveClipRef.current = onRemoveClip
+  const pxPerSecRef = useRef(pxPerSec)
+  pxPerSecRef.current = pxPerSec
   const playingRef = useRef(false)
   const programmatic = useRef(false)
+  // tracks the *real* (unsnapped) edges of an in-progress drag/resize so the magnet
+  // can release: the plugin moves a region by delta, so if we just reset it to the
+  // snap target the accumulated mouse movement is lost and the edge gets trapped.
+  const dragRef = useRef<{ id: string; rs: number; re: number; ss: number; se: number } | null>(
+    null,
+  )
   const manualIds = useRef<Set<string>>(new Set())
   const pendingStart = useRef<number | null>(null)
   const selectedRef = useRef<string | null>(null)
@@ -101,6 +125,24 @@ export function ReelWaveTimeline({
       if (t >= c.offset) target = c
     }
     return target
+  }
+
+  /** Magnet a time onto the nearest clip boundary / other cut edge / playhead within
+   *  SNAP_PX. Pixel-based so the pull feels identical at any zoom. */
+  function snapTime(t: number, excludeId: string | null, includePlayhead = true): number {
+    const pps = pxPerSecRef.current
+    if (!pps || pps <= 0) return t
+    const targets: number[] = []
+    for (const c of clipsRef.current) targets.push(c.offset, c.offset + (c.duration || 0))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const r of regionsRef.current?.getRegions() ?? []) {
+      // snap to other cut edges AND transcript (word) cut edges
+      if (r.id !== excludeId && (isCut(r.id) || isWord(r.id))) targets.push(r.start, r.end)
+    }
+    // playhead skipped for the b-key marks (they already sit on it → would self-snap)
+    const ph = includePlayhead ? wsRef.current?.getCurrentTime?.() : undefined
+    if (typeof ph === 'number' && ph > 0) targets.push(ph)
+    return nearestSnap(t, targets, SNAP_PX / pps)
   }
 
   /** Rebuild a clip's full cut list (clip-local) from the current regions. */
@@ -206,27 +248,76 @@ export function ReelWaveTimeline({
       manualIds.current.add(id)
       const lo = clip.offset
       const hi = clip.offset + (clip.duration || 0)
+      const ss = snapTime(r.start, r.id)
+      const se = snapTime(r.end, r.id)
       programmatic.current = true
       r.setOptions({
         id,
         color: MANUAL_COLOR,
-        start: Math.max(lo, Math.min(r.start, hi)),
-        end: Math.max(lo, Math.min(r.end, hi)),
+        start: Math.max(lo, Math.min(ss, hi)),
+        end: Math.max(lo, Math.min(se, hi)),
       })
       programmatic.current = false
       onCutsRef.current(clip.id, collect(clip.id))
     })
 
+    // LIVE magnet while dragging/resizing. The plugin applies a delta to the
+    // region each pointermove; we accumulate the true position in `dragRef` so
+    // snapping is computed from where the mouse really is (and releases past the
+    // threshold) rather than from the previously-snapped value.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    regions.on('region-update', (r: any, side: string | undefined) => {
+      if (programmatic.current || !isCut(r.id)) return
+      const clip = clipsRef.current.find((c) => c.id === r.id.split('::')[0])
+      if (!clip) return
+      const lo = clip.offset
+      const hi = clip.offset + (clip.duration || 0)
+      let d = dragRef.current
+      if (!d || d.id !== r.id) {
+        d = { id: r.id, rs: r.start, re: r.end, ss: r.start, se: r.end }
+        dragRef.current = d
+      } else {
+        d.rs += r.start - d.ss // add the delta the plugin just applied
+        d.re += r.end - d.se
+      }
+      let ns = d.rs
+      let ne = d.re
+      if (side === 'start') ns = snapTime(d.rs, r.id)
+      else if (side === 'end') ne = snapTime(d.re, r.id)
+      else {
+        // moving the whole region: shift to align an edge, preserving width
+        const sa = snapTime(d.rs, r.id)
+        if (sa !== d.rs) {
+          ns = sa
+          ne = d.re + (sa - d.rs)
+        } else {
+          const sb = snapTime(d.re, r.id)
+          ne = sb
+          ns = d.rs + (sb - d.re)
+        }
+      }
+      ns = Math.max(lo, Math.min(ns, hi))
+      ne = Math.max(lo, Math.min(ne, hi))
+      d.ss = ns
+      d.se = ne
+      if (ns !== r.start || ne !== r.end) {
+        programmatic.current = true
+        r.setOptions({ start: ns, end: ne })
+        programmatic.current = false
+      }
+    })
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     regions.on('region-updated', (r: any) => {
+      dragRef.current = null
       if (programmatic.current || !isCut(r.id)) return
       const clipId = r.id.split('::')[0]
       const clip = clipsRef.current.find((c) => c.id === clipId)
       if (!clip) return
       const lo = clip.offset
       const hi = clip.offset + (clip.duration || 0)
-      const ns = Math.max(lo, Math.min(r.start, hi))
-      const ne = Math.max(lo, Math.min(r.end, hi))
+      const ns = Math.max(lo, Math.min(snapTime(r.start, r.id), hi))
+      const ne = Math.max(lo, Math.min(snapTime(r.end, r.id), hi))
       if (ns !== r.start || ne !== r.end) {
         programmatic.current = true
         r.setOptions({ start: ns, end: ne })
@@ -457,7 +548,7 @@ export function ReelWaveTimeline({
       e.preventDefault()
       const offset =
         clipsRef.current.find((c) => c.id === activeIdRef.current)?.offset ?? 0
-      const cur = offset + v.currentTime
+      const cur = snapTime(offset + v.currentTime, null, false)
 
       if (pendingStart.current == null) {
         pendingStart.current = cur

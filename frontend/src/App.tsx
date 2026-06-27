@@ -47,12 +47,13 @@ import { ReelSidebar } from './components/ReelSidebar'
 import { ReelSwitcher } from './components/ReelSwitcher'
 import { ReelWaveTimeline } from './components/ReelWaveTimeline'
 import { SilenceControls } from './components/SilenceControls'
-import { TranscriptView } from './components/TranscriptView'
+import { TranscriptView, type Gap } from './components/TranscriptView'
 import './App.css'
 
 const MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3']
 const REEL_KEY = 'kitcut.reelId'
 const PAGE_SIZE = 5 // clips per timeline page
+const GAP_MIN = 0.2 // s — non-speech gaps shorter than this aren't shown as rows
 
 function App() {
   const [health, setHealth] = useState<Health | null>(null)
@@ -667,6 +668,9 @@ function App() {
 
   // persist a cut edit to its owning clip (active or not); refresh the timeline
   function onClipCutsChange(clipId: string, next: CutRegion[]) {
+    // keep the active project's cuts in sync so transcript-gap edits read a current
+    // list (the debounced save below is the source of truth for kept/timeline)
+    setProject((prev) => (prev && prev.id === clipId ? { ...prev, cuts: next } : prev))
     if (cutTimer.current) clearTimeout(cutTimer.current)
     cutTimer.current = window.setTimeout(async () => {
       try {
@@ -680,6 +684,29 @@ function App() {
         setError(String(e))
       }
     }, 200)
+  }
+
+  // Cut/restore a non-speech gap from the transcript. Manual layer only: adds a
+  // manual cut, or (restore) drops manual cuts overlapping the span — VAD auto-cuts
+  // are left alone. Routes through the same path as timeline cut edits.
+  function onToggleGap(start: number, end: number, cut: boolean) {
+    const id = activeIdRef.current
+    if (!id || !project || project.id !== id) return
+    const cuts: CutRegion[] = cut
+      ? project.cuts.filter(
+          (c) => !(c.source === 'manual' && c.start < end && c.end > start),
+        )
+      : [
+          ...project.cuts,
+          {
+            id: `gap-${Math.random().toString(36).slice(2, 10)}`,
+            start,
+            end,
+            source: 'manual',
+            kind: 'nonspeech',
+          },
+        ]
+    onClipCutsChange(id, cuts) // syncs project.cuts + saves
   }
 
   function persistRemovedWords(segments: Project['segments']) {
@@ -808,6 +835,31 @@ function App() {
   const transcribed = project?.status === 'transcribed'
   const activeBusy = activeId ? busyIds.includes(activeId) : false
   const totals = timeline?.totals
+
+  // Non-speech gaps for the transcript: head (before first line), one after each
+  // line (the last is the tail), each tagged cut/kept from the current `kept`.
+  const gaps = useMemo(() => {
+    const out: { head: Gap | null; after: Record<number, Gap> } = {
+      head: null,
+      after: {},
+    }
+    const segs = project && project.id === activeId ? project.segments : []
+    const duration = project?.duration ?? 0
+    if (!segs.length || !duration) return out
+    const keptOverlap = (s: number, e: number) => {
+      let ov = 0
+      for (const [ks, ke] of kept) ov += Math.max(0, Math.min(e, ke) - Math.max(s, ks))
+      return ov
+    }
+    const mk = (s: number, e: number): Gap | null =>
+      e - s < GAP_MIN ? null : { start: s, end: e, cut: keptOverlap(s, e) < (e - s) * 0.5 }
+    out.head = mk(0, segs[0].start)
+    for (let i = 0; i < segs.length; i++) {
+      const g = mk(segs[i].end, i + 1 < segs.length ? segs[i + 1].start : duration)
+      if (g) out.after[segs[i].id] = g
+    }
+    return out
+  }, [project, activeId, kept])
   const activeSub =
     subs && project && project.id === activeId
       ? (() => {
@@ -950,10 +1002,12 @@ function App() {
                   {project.id === activeId ? (
                     <TranscriptView
                       segments={project.segments}
+                      gaps={gaps}
                       currentTime={currentTime}
                       onToggleWord={toggleWord}
                       onToggleSegment={toggleSegment}
                       onToggleHiddenSegment={toggleHiddenSegment}
+                      onToggleGap={onToggleGap}
                       onSeek={seek}
                       onEditWord={editWord}
                     />
