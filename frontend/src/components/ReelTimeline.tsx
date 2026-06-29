@@ -65,6 +65,14 @@ type Drag =
       moved: boolean
     }
 
+const JUNCTION_PX = 10 // how close a right-click must be to a clip boundary to mean its junction
+
+// A togglable transition point: an internal cut-join (keyed by its cut) or a
+// clip-to-clip junction (keyed by the junction's LEFT clip id). `on` = currently active.
+type Seam =
+  | { kind: 'cut'; clipId: string; cutId: string; on: boolean }
+  | { kind: 'junction'; leftId: string; on: boolean }
+
 const newCutId = () => `manual-${Math.random().toString(36).slice(2, 10)}`
 
 /** True when two cut lists describe the same edit (so a local draft can be
@@ -142,6 +150,7 @@ export function ReelTimeline({
   onScrub,
   onClipCutsChange,
   onRemoveClip,
+  onToggleJunction,
   videoRef,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -159,6 +168,7 @@ export function ReelTimeline({
     y: number
     clipId: string | null
     cut: { clipId: string; cutId: string } | null
+    seam: Seam | null
   } | null>(null)
 
   const total = useMemo(
@@ -186,6 +196,8 @@ export function ReelTimeline({
   onCutsRef.current = onClipCutsChange
   const onRemoveClipRef = useRef(onRemoveClip)
   onRemoveClipRef.current = onRemoveClip
+  const onToggleJunctionRef = useRef(onToggleJunction)
+  onToggleJunctionRef.current = onToggleJunction
   const peaksRef = useRef<Peaks | null>(null)
   const cursorRef = useRef<number | null>(null) // page-local seconds, or null = off page
   const playingRef = useRef(false)
@@ -477,6 +489,41 @@ export function ReelTimeline({
     if (selectedRef.current) deleteCut(selectedRef.current)
   }
 
+  /** The transition seam at a point: the cut under the cursor (its join), else a
+   *  clip-to-clip boundary within JUNCTION_PX. `null` when there's no join there. */
+  function seamAt(t: number, y: number): Seam | null {
+    const pps = ppsRef.current
+    const list = clipsRef.current
+    const clip = clipAtTime(list, t)
+    if (clip && inEditArea(y)) {
+      const hit = findCutAt(cutsFor(clip), t - clip.offset, EDGE_PX / pps, HIT_PX / pps)
+      if (hit) {
+        const cut = cutsFor(clip)[hit.index]
+        return { kind: 'cut', clipId: clip.id, cutId: cut.id, on: !!cut.transition }
+      }
+    }
+    for (let i = 1; i < list.length; i++) {
+      if (Math.abs(t - list[i].offset) * pps <= JUNCTION_PX) {
+        const leftId = list[i - 1].id
+        return { kind: 'junction', leftId, on: !disabledJunctionsRef.current.includes(leftId) }
+      }
+    }
+    return null
+  }
+
+  function toggleSeam(s: Seam) {
+    if (s.kind === 'cut') {
+      const list = beginEdit(s.clipId).map((c) =>
+        c.id === s.cutId ? { ...c, transition: !c.transition } : c,
+      )
+      editsRef.current.set(s.clipId, list)
+      commitClip(s.clipId)
+      draw()
+    } else {
+      onToggleJunctionRef.current(s.leftId, !s.on)
+    }
+  }
+
   // ─── Decode audio → peaks (skipped entirely when the toggle is off) ──────
   useEffect(() => {
     if (!audioOn) {
@@ -717,9 +764,30 @@ export function ReelTimeline({
     capture(e.pointerId)
   }
 
+  /** Hover affordance: resize on a cut edge, move on its body, crosshair on empty
+   *  editable space, default (scrub) on the clip ribbon. */
+  function updateHoverCursor(clientX: number, clientY: number) {
+    const cv = canvasRef.current
+    if (!cv) return
+    const { y, t } = locate(clientX, clientY)
+    const pps = ppsRef.current
+    let cursor = 'default'
+    if (inEditArea(y)) {
+      const clip = clipAtTime(clipsRef.current, t)
+      if (clip) {
+        const hit = findCutAt(cutsFor(clip), t - clip.offset, EDGE_PX / pps, HIT_PX / pps)
+        cursor = hit ? (hit.side === 'body' ? 'move' : 'ew-resize') : 'crosshair'
+      }
+    }
+    if (cv.style.cursor !== cursor) cv.style.cursor = cursor
+  }
+
   function onPointerMove(e: React.PointerEvent) {
     const d = dragRef.current
-    if (!d) return
+    if (!d) {
+      updateHoverCursor(e.clientX, e.clientY)
+      return
+    }
     const { t } = locate(e.clientX, e.clientY)
     const pps = ppsRef.current
     if (d.mode === 'scrub') {
@@ -850,7 +918,7 @@ export function ReelTimeline({
       if (hit) cut = { clipId: clip.id, cutId: cutsFor(clip)[hit.index].id }
     }
     if (cut) selectCut(cut)
-    setMenu({ x: e.clientX, y: e.clientY, clipId: clip?.id ?? null, cut })
+    setMenu({ x: e.clientX, y: e.clientY, clipId: clip?.id ?? null, cut, seam: seamAt(t, y) })
   }
 
   // ─── Toolbar actions ─────────────────────────────────────────────────────
@@ -881,8 +949,8 @@ export function ReelTimeline({
           {audioOn ? '🔊 Audio' : '🔇 No audio'}
         </button>
         <span className="b-hint">
-          click to scrub · drag to cut · drag a cut to move/resize · right-click or select + ⌫ to
-          delete
+          click to scrub · drag to cut · drag a cut to move/resize · right-click a cut or clip
+          boundary → add/remove transition or delete
         </span>
       </div>
       <div className="rtl-viewport" style={{ height: lanesH }}>
@@ -893,6 +961,9 @@ export function ReelTimeline({
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
+            onPointerLeave={() => {
+              if (canvasRef.current) canvasRef.current.style.cursor = ''
+            }}
             onContextMenu={onContextMenu}
           />
           <div className="rtl-sizer" style={{ width: contentWidth, height: 1 }} />
@@ -905,6 +976,16 @@ export function ReelTimeline({
       </div>
       {menu && (
         <div className="rwt-menu" style={{ left: menu.x, top: menu.y }}>
+          {menu.seam && (
+            <button
+              onClick={() => {
+                toggleSeam(menu.seam!)
+                setMenu(null)
+              }}
+            >
+              {menu.seam.on ? 'Remove transition' : 'Add transition'}
+            </button>
+          )}
           {menu.cut && (
             <button
               className="rwt-menu-del"
