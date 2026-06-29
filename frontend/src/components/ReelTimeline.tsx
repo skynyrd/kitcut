@@ -52,7 +52,7 @@ const AUDIO_KEY = 'kitcut.reelAudio'
 
 // pointer drag state machine for the cut lane
 type Drag =
-  | { mode: 'scrub' }
+  | { mode: 'scrub'; downT: number; moved: boolean }
   | { mode: 'create'; clipId: string; anchor: number; cutId: string; started: boolean }
   | {
       mode: 'move' | 'resize'
@@ -72,6 +72,12 @@ const JUNCTION_PX = 10 // how close a right-click must be to a clip boundary to 
 type Seam =
   | { kind: 'cut'; clipId: string; cutId: string; on: boolean }
   | { kind: 'junction'; leftId: string; on: boolean }
+
+// One reversible step. Clip removal is intentionally NOT undoable (it drops a
+// whole video from the reel — a deliberate, heavier action).
+type UndoEntry =
+  | { kind: 'cuts'; clipId: string; prev: CutRegion[] } // restore a clip's cut list
+  | { kind: 'junction'; leftId: string; prev: boolean } // restore a junction's enabled state
 
 const newCutId = () => `manual-${Math.random().toString(36).slice(2, 10)}`
 
@@ -206,6 +212,10 @@ export function ReelTimeline({
   const editsRef = useRef<Map<string, CutRegion[]>>(new Map())
   const selectedRef = useRef<{ clipId: string; cutId: string } | null>(null)
   const dragRef = useRef<Drag | null>(null)
+  const undoRef = useRef<UndoEntry[]>([])
+  const redoRef = useRef<UndoEntry[]>([])
+  // snapshot taken at drag start, pushed to the undo stack only if the drag commits
+  const pendingUndoRef = useRef<{ clipId: string; prev: CutRegion[] } | null>(null)
 
   const fit = viewportW > 0 && total > 0 ? viewportW / total : 0
   const contentWidth = Math.max(viewportW, total * pxPerSec)
@@ -478,7 +488,65 @@ export function ReelTimeline({
     draw()
   }
 
+  // ─── Undo / redo (cut edits + junction toggles; not clip removal) ────────
+  const cutsForClipId = (clipId: string): CutRegion[] => {
+    const clip = clipsRef.current.find((c) => c.id === clipId)
+    return clip ? cutsFor(clip) : []
+  }
+  /** Snapshot the CURRENT state of the same target an entry points at — the inverse
+   *  step, used to fill the opposite stack when undoing/redoing. */
+  function captureState(e: UndoEntry): UndoEntry {
+    if (e.kind === 'cuts')
+      return { kind: 'cuts', clipId: e.clipId, prev: cutsForClipId(e.clipId).map((c) => ({ ...c })) }
+    return { kind: 'junction', leftId: e.leftId, prev: !disabledJunctionsRef.current.includes(e.leftId) }
+  }
+  function applyEntry(e: UndoEntry) {
+    if (e.kind === 'cuts') {
+      editsRef.current.set(e.clipId, e.prev.map((c) => ({ ...c })))
+      const sel = selectedRef.current
+      if (sel && sel.clipId === e.clipId && !e.prev.some((c) => c.id === sel.cutId))
+        selectedRef.current = null
+      commitClip(e.clipId)
+      draw()
+    } else {
+      onToggleJunctionRef.current(e.leftId, e.prev)
+    }
+  }
+  /** Record a new reversible action; a fresh action invalidates the redo branch. */
+  function recordUndo(entry: UndoEntry) {
+    undoRef.current.push(entry)
+    if (undoRef.current.length > 50) undoRef.current.shift()
+    redoRef.current = []
+  }
+  function pushCutsUndo(clipId: string) {
+    recordUndo({ kind: 'cuts', clipId, prev: cutsForClipId(clipId).map((c) => ({ ...c })) })
+  }
+  function pushPendingUndo() {
+    if (!pendingUndoRef.current) return
+    recordUndo({ kind: 'cuts', ...pendingUndoRef.current })
+    pendingUndoRef.current = null
+  }
+  function undo() {
+    const entry = undoRef.current.pop()
+    if (!entry) return
+    redoRef.current.push(captureState(entry)) // current state → redo
+    applyEntry(entry)
+  }
+  function redo() {
+    const entry = redoRef.current.pop()
+    if (!entry) return
+    undoRef.current.push(captureState(entry)) // current state → undo
+    applyEntry(entry)
+  }
+
+  /** Scrub, snapping the target to a nearby edge (clip boundary / cut / transcript),
+   *  but NOT the playhead itself (that would just stick it in place). */
+  function scrubTo(t: number) {
+    onScrubRef.current(snapTime(t, null, false))
+  }
+
   function deleteCut(sel: { clipId: string; cutId: string }) {
+    pushCutsUndo(sel.clipId)
     const list = beginEdit(sel.clipId).filter((c) => c.id !== sel.cutId)
     editsRef.current.set(sel.clipId, list)
     if (selectedRef.current?.cutId === sel.cutId) selectedRef.current = null
@@ -513,6 +581,7 @@ export function ReelTimeline({
 
   function toggleSeam(s: Seam) {
     if (s.kind === 'cut') {
+      pushCutsUndo(s.clipId)
       const list = beginEdit(s.clipId).map((c) =>
         c.id === s.cutId ? { ...c, transition: !c.transition } : c,
       )
@@ -520,6 +589,7 @@ export function ReelTimeline({
       commitClip(s.clipId)
       draw()
     } else {
+      recordUndo({ kind: 'junction', leftId: s.leftId, prev: s.on })
       onToggleJunctionRef.current(s.leftId, !s.on)
     }
   }
@@ -677,10 +747,36 @@ export function ReelTimeline({
         setMenu(null)
         return
       }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+        return
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault()
+        redo()
+        return
+      }
       if (e.key === 'Backspace' || e.key === 'Delete') {
         if (!selectedRef.current) return
         e.preventDefault()
         deleteSelected()
+        return
+      }
+      // ← / → step the playhead one frame (precise; no snap) so you can land exactly
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        const list = clipsRef.current
+        if (!list.length) return
+        e.preventDefault()
+        const tot = list.reduce((a, c) => a + (c.duration || 0), 0)
+        const cur = cursorRef.current ?? 0
+        const here = clipAtTime(list, cur)
+        const fps = here?.fps && here.fps > 0 ? here.fps : 30
+        const next = Math.max(0, Math.min(tot, cur + (e.key === 'ArrowRight' ? 1 : -1) / fps))
+        cursorRef.current = next
+        positionPlayhead()
+        onScrubRef.current(next)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -730,8 +826,8 @@ export function ReelTimeline({
     const pps = ppsRef.current
     const clip = inEditArea(y) ? clipAtTime(clipsRef.current, t) : null
     if (!clip) {
-      dragRef.current = { mode: 'scrub' }
-      onScrubRef.current(t)
+      dragRef.current = { mode: 'scrub', downT: t, moved: false }
+      onScrubRef.current(t) // raw live feedback; a pure click snaps on release
       capture(e.pointerId)
       return
     }
@@ -740,6 +836,7 @@ export function ReelTimeline({
       const cut = cutsFor(clip)[hit.index]
       selectCut({ clipId: clip.id, cutId: cut.id })
       beginEdit(clip.id)
+      pendingUndoRef.current = { clipId: clip.id, prev: cutsForClipId(clip.id).map((c) => ({ ...c })) }
       dragRef.current = {
         mode: hit.side === 'body' ? 'move' : 'resize',
         clipId: clip.id,
@@ -753,6 +850,7 @@ export function ReelTimeline({
     } else {
       selectCut(null)
       beginEdit(clip.id) // seed the working list so the first move can push the cut
+      pendingUndoRef.current = { clipId: clip.id, prev: cutsForClipId(clip.id).map((c) => ({ ...c })) }
       dragRef.current = {
         mode: 'create',
         clipId: clip.id,
@@ -791,7 +889,8 @@ export function ReelTimeline({
     const { t } = locate(e.clientX, e.clientY)
     const pps = ppsRef.current
     if (d.mode === 'scrub') {
-      onScrubRef.current(t)
+      d.moved = true
+      onScrubRef.current(t) // smooth while dragging
       return
     }
     const clip = clipsRef.current.find((c) => c.id === d.clipId)
@@ -870,31 +969,45 @@ export function ReelTimeline({
     } catch {
       /* may not have captured */
     }
-    if (!d || d.mode === 'scrub') return
+    if (!d) return
+    if (d.mode === 'scrub') {
+      if (!d.moved) scrubTo(d.downT) // a click (no drag) snaps to a nearby edge
+      return
+    }
 
     if (d.mode === 'create') {
       if (!d.started) {
+        pendingUndoRef.current = null
         dropEditIfClean(d.clipId) // the seed clone was unused → drop it
-        onScrubRef.current(d.anchor) // a plain click → scrub
+        scrubTo(d.anchor) // a plain click → scrub (snapped to a nearby edge)
         return
       }
       const list = editsRef.current.get(d.clipId)
       const cut = list?.find((x) => x.id === d.cutId)
       if (!list || !cut || cut.end - cut.start < MIN_CUT) {
         // too short → discard
+        pendingUndoRef.current = null
         if (list) editsRef.current.set(d.clipId, list.filter((x) => x.id !== d.cutId))
         dropEditIfClean(d.clipId)
         draw()
         return
       }
+      pushPendingUndo()
       selectCut({ clipId: d.clipId, cutId: d.cutId })
       commitClip(d.clipId)
       return
     }
 
     // move / resize
-    if (d.moved) commitClip(d.clipId)
-    else dropEditIfClean(d.clipId) // a click that only selected — no edit to save
+    if (d.moved) {
+      pushPendingUndo()
+      commitClip(d.clipId)
+    } else {
+      // a click on a cut: no edit to save, but still move the playhead there
+      pendingUndoRef.current = null
+      dropEditIfClean(d.clipId)
+      scrubTo(d.grab)
+    }
     draw()
   }
 
@@ -949,8 +1062,8 @@ export function ReelTimeline({
           {audioOn ? '🔊 Audio' : '🔇 No audio'}
         </button>
         <span className="b-hint">
-          click to scrub · drag to cut · drag a cut to move/resize · right-click a cut or clip
-          boundary → add/remove transition or delete
+          click to scrub (snaps) · ←/→ step a frame · drag to cut · drag a cut to move/resize ·
+          right-click → transition / delete · ⌘Z undo · ⇧⌘Z redo
         </span>
       </div>
       <div className="rtl-viewport" style={{ height: lanesH }}>
