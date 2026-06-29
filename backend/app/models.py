@@ -71,6 +71,7 @@ class CutRegion(BaseModel):
     end: float
     source: CutSource = CutSource.auto
     kind: CutKind = CutKind.speech
+    transition: bool = False  # add a Slide+swipe at the join this cut leaves behind
 
 
 class ProjectStatus(str, Enum):
@@ -117,3 +118,6 @@ class Reel(BaseModel):
     name: str
     clip_ids: list[str] = Field(default_factory=list)
     default_cut_params: CutParams = Field(default_factory=CutParams)
+    # left-clip ids whose *following* clip-to-clip transition is suppressed
+    # (clip junctions are auto-on by default; this is the per-junction opt-out)
+    disabled_junctions: list[str] = Field(default_factory=list)

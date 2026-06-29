@@ -303,7 +303,9 @@ def build_reel_fcpxml(
         seq_fd = (1001, 60000) if round(seq_fps) >= 50 else (1001, 30000)
     seq_audio_rate = first_clip.audio_rate or 48000
 
-    add_transitions = transitions and len(clips) >= 2
+    # Master gate. Junctions need 2+ clips (implied by a junction existing); internal
+    # cut-joins can occur in a single-clip reel too, so don't gate on clip count here.
+    add_transitions = transitions
     half = TRANSITION_FRAMES // 2
     sfx_src = _sfx_source() if add_transitions else None
     if sfx_src is not None:
@@ -361,6 +363,10 @@ def build_reel_fcpxml(
         )
 
         kept = cutlib.project_kept(clip) or [(0.0, duration)]
+        # starts of cuts the user opted into a transition for; a kept interval whose
+        # left edge sits on one of these carries an internal-join transition.
+        tstarts = [c.start for c in clip.cuts if c.transition]
+        prev_e: float | None = None
         intervals: list[dict] = []
         for s, e in kept:
             in_frames = _to_frames(s, fd)
@@ -369,6 +375,10 @@ def build_reel_fcpxml(
             raw_len = min(_to_frames(e - s, seq_fd), asset_dur_frames - in_frames)
             if raw_len <= 0:
                 continue
+            trans_before = prev_e is not None and any(
+                abs(prev_e - cs) < 1e-4 for cs in tstarts
+            )
+            prev_e = e
             subs: list[str] = []
             for seg in clip.segments:
                 ov_s = max(seg.start, s)
@@ -386,82 +396,96 @@ def build_reel_fcpxml(
                 off = _tf(_to_frames(t0_sec + ov_s, seq_fd), seq_fd)
                 dur = _tf(_to_frames(ov_e - ov_s, seq_fd), seq_fd)
                 subs.append(_subtitle_piece(use_title, lang, style_id, off, dur, text))
-            intervals.append({"in_frames": in_frames, "raw_len": raw_len, "subs": subs})
+            intervals.append(
+                {
+                    "in_frames": in_frames,
+                    "raw_len": raw_len,
+                    "subs": subs,
+                    "trans_before": trans_before,
+                }
+            )
         clips_meta.append(
             {"fd": fd, "t0": t0, "tcfmt": tcfmt, "asset_id": asset_id,
              "name": name, "intervals": intervals}
         )
 
-    # Decide junctions between consecutive non-empty clips. A centered transition
-    # needs `half` frames of handle media on each side; whole-video clips span the
-    # full asset and have none, so we trim `half` off the inside edge of each
-    # boundary clip — those trimmed frames become the handle FCP slides into.
-    ne = [i for i, m in enumerate(clips_meta) if m["intervals"]]
-    trim_head: set[int] = set()
-    trim_tail: set[int] = set()
-    junctions: list[tuple[int, int]] = []
+    # Flatten every non-empty interval into one ordered list — each adjacent pair is
+    # a "seam". A seam is a clip-to-clip junction (different clips) or an internal
+    # cut-join (same clip, where a silence was removed). Both carry the SAME Slide.
+    flat: list[tuple[int, dict]] = [
+        (i, iv) for i, m in enumerate(clips_meta) for iv in m["intervals"]
+    ]
+    clip_ids = [clip.id for clip, _ in clips]
+    disabled = set(reel.disabled_junctions)
+
+    # Decide which seams get a transition + the per-record handle trims. A centered
+    # transition needs `half` frames of handle on each side; whole/edge intervals
+    # have none, so we trim `half` off the inside of each boundary interval — those
+    # trimmed frames become the handle FCP slides into.
+    seam_on = [False] * len(flat)  # seam_on[k] → transition before flat[k]
+    trim_left = [0] * len(flat)
+    trim_right = [0] * len(flat)
     if add_transitions:
-        for k in range(1, len(ne)):
-            a, b = ne[k - 1], ne[k]
+        for k in range(1, len(flat)):
+            (ai, aiv), (bi, biv) = flat[k - 1], flat[k]
             # ≥ a full transition of frames so an edge can give head+tail and stay >0
             if (
-                clips_meta[a]["intervals"][-1]["raw_len"] >= 2 * TRANSITION_FRAMES
-                and clips_meta[b]["intervals"][0]["raw_len"] >= 2 * TRANSITION_FRAMES
+                aiv["raw_len"] < 2 * TRANSITION_FRAMES
+                or biv["raw_len"] < 2 * TRANSITION_FRAMES
             ):
-                trim_tail.add(a)
-                trim_head.add(b)
-                junctions.append((a, b))
+                continue
+            if ai != bi:  # clip junction: auto-on unless this left clip opted out
+                on = clip_ids[ai] not in disabled
+            else:  # internal cut-join: opt-in per cut
+                on = biv["trans_before"]
+            if on:
+                seam_on[k] = True
+                trim_right[k - 1] = half
+                trim_left[k] = half
 
-    # Pass 2: lay the (trimmed) clips end-to-end, building records with offsets.
+    # Pass 2: lay the (trimmed) intervals end-to-end, building records with offsets.
     pos = 0  # cumulative timeline position across the whole reel, in seq frames
     records: list[dict] = []
-    first_ri: dict[int, int] = {}
-    last_ri: dict[int, int] = {}
-    for i, m in enumerate(clips_meta):
-        ivs = m["intervals"]
-        if not ivs:
-            continue
+    jcount: dict[int, int] = {}  # per-clip running interval number (for the name)
+    for k, (i, iv) in enumerate(flat):
+        m = clips_meta[i]
         fd, t0, tcfmt = m["fd"], m["t0"], m["tcfmt"]
-        asset_id, name, n = m["asset_id"], m["name"], len(ivs)
-        for j, iv in enumerate(ivs):
-            th = half if (j == 0 and i in trim_head) else 0
-            tt = half if (j == n - 1 and i in trim_tail) else 0
-            in_f = iv["in_frames"] + th
-            length = iv["raw_len"] - th - tt
-            open_tag = (
-                f'          <asset-clip ref="{asset_id}" name="{name} {j + 1}" '
-                f'offset="{_tf(pos, seq_fd)}" start="{_tf(t0 + in_f, fd)}" '
-                f'duration="{_tf(length, seq_fd)}" tcFormat="{tcfmt}"'
-            )
-            ri = len(records)
-            records.append(
-                {
-                    "open_tag": open_tag,
-                    "subs": iv["subs"],
-                    "extra": [],
-                    "pos": pos,
-                    "len_frames": length,
-                    "fd": fd,
-                    "t0": t0,
-                    "in_frames": in_f,
-                }
-            )
-            if j == 0:
-                first_ri[i] = ri
-            if j == n - 1:
-                last_ri[i] = ri
-            pos += length
+        asset_id, name = m["asset_id"], m["name"]
+        jn = jcount.get(i, 0) + 1
+        jcount[i] = jn
+        tl, tr = trim_left[k], trim_right[k]
+        in_f = iv["in_frames"] + tl
+        length = iv["raw_len"] - tl - tr
+        open_tag = (
+            f'          <asset-clip ref="{asset_id}" name="{name} {jn}" '
+            f'offset="{_tf(pos, seq_fd)}" start="{_tf(t0 + in_f, fd)}" '
+            f'duration="{_tf(length, seq_fd)}" tcFormat="{tcfmt}"'
+        )
+        records.append(
+            {
+                "open_tag": open_tag,
+                "subs": iv["subs"],
+                "extra": [],
+                "pos": pos,
+                "len_frames": length,
+                "fd": fd,
+                "t0": t0,
+                "in_frames": in_f,
+            }
+        )
+        pos += length
 
-    # A Slide at each junction (centered on the trimmed edit) + the swipe SFX hung
-    # off the preceding clip, anchored to the transition's first frame.
+    # A Slide at each enabled seam (centered on the trimmed edit) + the swipe SFX hung
+    # off the preceding interval, anchored to the transition's first frame.
     transition_before: dict[int, str] = {}
     used_transition = used_sfx = False
-    for a, b in junctions:
-        bi = first_ri[b]
-        transition_before[bi] = _render_transition(records[bi]["pos"] - half, seq_fd)
+    for k in range(1, len(flat)):
+        if not seam_on[k]:
+            continue
+        transition_before[k] = _render_transition(records[k]["pos"] - half, seq_fd)
         used_transition = True
         if sfx_src is not None:
-            ar = records[last_ri[a]]
+            ar = records[k - 1]
             ar["extra"].append(_render_sfx_child(ar, half, seq_fd, sfx_dur_str))
             used_sfx = True
 

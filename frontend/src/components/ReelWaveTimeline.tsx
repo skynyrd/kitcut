@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
 import { reelAudioUrl, type CutRegion, type SilenceKind, type TimelineClip } from '../api'
+import { nearestSnap, transitionMarkers } from './timelineGeometry'
 
 const CUT_COLORS: Record<SilenceKind, string> = {
   speech: 'rgba(192, 57, 43, 0.30)',
@@ -12,15 +13,23 @@ const PENDING_COLOR = 'rgba(231, 76, 60, 0.95)'
 const WORD_COLOR = 'rgba(142, 68, 173, 0.40)'
 const BAND_A = 'rgba(122, 156, 198, 0.05)'
 const BAND_B = 'rgba(122, 156, 198, 0.14)'
+const TRANS_COLOR = '#ffc233' // transition marker line (gold — distinct from cuts/divider/active)
 const DIVIDER = '2px solid rgba(30, 58, 95, 0.6)'
 const ACTIVE_FRAME = 'inset 0 0 0 2px rgba(93, 255, 143, 0.55)'
 const SELECT_OUTLINE = '2px solid #5dff8f'
 
+// A togglable transition point nearest the right-click: an internal cut-join (keyed
+// by its cut) or a clip-to-clip junction (keyed by the junction's LEFT clip id).
+type SeamTarget =
+  | { kind: 'cut'; clipId: string; cutId: string; on: boolean }
+  | { kind: 'junction'; leftId: string; on: boolean }
+
 interface MenuState {
   x: number
   y: number
-  regionId: string | null
-  clipId: string | null
+  regionId: string | null // the cut under the cursor (for "Delete cut")
+  clipId: string | null // the clip under the cursor (for "Delete clip")
+  seam: SeamTarget | null // nearest transition point to the click (for "… transition here")
 }
 
 interface Props {
@@ -30,9 +39,11 @@ interface Props {
   activeId: string | null
   globalTime: number
   audioRev: number
+  disabledJunctions: string[]
   onScrub: (globalTime: number) => void
   onClipCutsChange: (clipId: string, cuts: CutRegion[]) => void
   onRemoveClip: (clipId: string) => void
+  onToggleJunction: (leftClipId: string, enabled: boolean) => void
   videoRef: RefObject<HTMLVideoElement | null>
 }
 
@@ -46,23 +57,11 @@ function labelEl(name: string, active: boolean): HTMLElement {
 const isWord = (id: string) => id.includes('::word-')
 const isLabel = (id: string) => id.startsWith('label::')
 const isBand = (id: string) => id.startsWith('band::')
-const isCut = (id: string) => !isWord(id) && !isLabel(id) && !isBand(id) && id !== 'pending'
+const isTrans = (id: string) => id.startsWith('trans::') // a "T" transition marker
+const isCut = (id: string) =>
+  !isWord(id) && !isLabel(id) && !isBand(id) && !isTrans(id) && id !== 'pending'
 
 const SNAP_PX = 7 // magnet radius for manual-cut edges, in pixels
-
-/** Snap `value` to the nearest of `targets` within `threshold`; else return `value`. */
-export function nearestSnap(value: number, targets: number[], threshold: number): number {
-  let best = value
-  let bestDist = threshold
-  for (const t of targets) {
-    const d = Math.abs(t - value)
-    if (d <= bestDist) {
-      bestDist = d
-      best = t
-    }
-  }
-  return best
-}
 
 /** Unified reel timeline: one waveform of the whole reel (concatenated clip
  *  audio). Every clip sits in a framed band; its cut + word regions are placed
@@ -74,9 +73,11 @@ export function ReelWaveTimeline({
   activeId,
   globalTime,
   audioRev,
+  disabledJunctions,
   onScrub,
   onClipCutsChange,
   onRemoveClip,
+  onToggleJunction,
   videoRef,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -100,8 +101,15 @@ export function ReelWaveTimeline({
   onCutsRef.current = onClipCutsChange
   const onRemoveClipRef = useRef(onRemoveClip)
   onRemoveClipRef.current = onRemoveClip
+  const onToggleJunctionRef = useRef(onToggleJunction)
+  onToggleJunctionRef.current = onToggleJunction
+  const disabledJunctionsRef = useRef(disabledJunctions)
+  disabledJunctionsRef.current = disabledJunctions
   const pxPerSecRef = useRef(pxPerSec)
   pxPerSecRef.current = pxPerSec
+  const globalTimeRef = useRef(globalTime)
+  globalTimeRef.current = globalTime
+  const playheadRef = useRef<HTMLDivElement>(null)
   const playingRef = useRef(false)
   const programmatic = useRef(false)
   // tracks the *real* (unsnapped) edges of an in-progress drag/resize so the magnet
@@ -166,10 +174,84 @@ export function ReelWaveTimeline({
           end: Math.min(dur, r.end - clip.offset),
           source: isManual ? 'manual' : 'auto',
           kind: ex?.kind ?? 'speech',
+          transition: ex?.transition ?? false, // preserve the opt-in across edits
         }
       })
       .sort((a: CutRegion, b: CutRegion) => a.start - b.start)
   }
+
+  /** Toggle the transition at a seam (the nearest one to where the user clicked):
+   *  a cut-join flips that cut's flag (read from the clip's authoritative cut list,
+   *  not the viewport-culled regions); a junction toggles via the reel. */
+  function toggleSeam(s: SeamTarget) {
+    if (s.kind === 'cut') {
+      const clip = clipsRef.current.find((c) => c.id === s.clipId)
+      if (!clip) return
+      // optimistic: outline the cut now, so it's instant (the save+refresh confirms it)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const reg = (regionsRef.current?.getRegions() ?? []).find(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (r: any) => r.id === `${s.clipId}::${s.cutId}`,
+      )
+      reg?.element?.classList.toggle('rwt-cut-trans', !s.on)
+      onCutsRef.current(
+        s.clipId,
+        clip.cuts.map((c) => (c.id === s.cutId ? { ...c, transition: !c.transition } : c)),
+      )
+    } else {
+      onToggleJunctionRef.current(s.leftId, !s.on)
+    }
+  }
+
+  /** The transition seam nearest `time` within `clip`: its cut-joins and its two
+   *  junctions, by distance to the nearest edge (0 when the playhead is INSIDE a cut, so
+   *  parking anywhere on a cut targets it; near a clip boundary targets the boundary). */
+  function nearestSeam(clip: TimelineClip, ci: number, time: number): SeamTarget | null {
+    const list = clipsRef.current
+    const disabled = disabledJunctionsRef.current
+    type C = { seam: SeamTarget; dist: number }
+    const cands: C[] = []
+    for (const cut of clip.cuts) {
+      const s = clip.offset + cut.start
+      const e = clip.offset + cut.end
+      const dist = time < s ? s - time : time > e ? time - e : 0
+      cands.push({ seam: { kind: 'cut', clipId: clip.id, cutId: cut.id, on: !!cut.transition }, dist })
+    }
+    if (ci > 0)
+      cands.push({
+        seam: { kind: 'junction', leftId: list[ci - 1].id, on: !disabled.includes(list[ci - 1].id) },
+        dist: Math.abs(time - clip.offset),
+      })
+    if (ci < list.length - 1)
+      cands.push({
+        seam: { kind: 'junction', leftId: clip.id, on: !disabled.includes(clip.id) },
+        dist: Math.abs(time - (clip.offset + (clip.duration || 0))),
+      })
+    if (!cands.length) return null
+    return cands.reduce((a, b) => (b.dist < a.dist ? b : a)).seam
+  }
+
+  /** A custom playhead overlay (taller than the waveform + a top handle) — wavesurfer's
+   *  own cursor is clipped to the waveform height, so we draw our own and keep it in
+   *  sync wherever the cursor moves (playback rAF, paused scrub, scroll, zoom). */
+  function positionPlayhead() {
+    const ph = playheadRef.current
+    const ws = wsRef.current
+    const el = containerRef.current
+    if (!ph || !ws || !el) return
+    const onPage = clipsRef.current.some((c) => c.id === activeIdRef.current)
+    const pps = pxPerSecRef.current
+    const t = ws.getCurrentTime?.() ?? 0
+    const x = t * pps - (ws.getScroll?.() ?? 0)
+    if (!onPage || pps <= 0 || x < 0 || x > el.clientWidth) {
+      ph.style.display = 'none'
+      return
+    }
+    ph.style.display = 'block'
+    ph.style.left = `${x}px`
+  }
+  const positionPlayheadRef = useRef(positionPlayhead)
+  positionPlayheadRef.current = positionPlayhead
 
   function selectCut(regionId: string | null) {
     selectedRef.current = regionId
@@ -210,8 +292,7 @@ export function ReelWaveTimeline({
       height: 130,
       waveColor: '#9bb4d0',
       progressColor: '#9bb4d0',
-      cursorColor: '#5dff8f',
-      cursorWidth: 2,
+      cursorWidth: 0, // hidden — we draw our own taller playhead overlay instead
       autoScroll: true,
       url: reelAudioUrl(reelId, audioRev, clipIds),
       plugins: [regions],
@@ -223,7 +304,9 @@ export function ReelWaveTimeline({
     ws.on('ready', () => {
       setReady(true)
       setPxPerSec(el.clientWidth / (ws.getDuration() || 1))
+      positionPlayheadRef.current()
     })
+    ws.on('scroll', () => positionPlayheadRef.current())
     ws.on('interaction', (time: number) => {
       selectCut(null)
       onScrubRef.current(time)
@@ -333,7 +416,10 @@ export function ReelWaveTimeline({
       deleteRegion(r.id)
     })
 
-    // right-click a cut or clip band → context menu
+    // right-click → context menu. The transition acts at the PLAYHEAD (positioned via
+    // ←/→ or a scrub) — snapped to the nearest seam (cut-join or clip boundary) — so
+    // it lands where you navigated, not where the mouse happened to be. Delete cut/clip
+    // still target what was actually clicked.
     const onCtx = (e: MouseEvent) => {
       const path = e.composedPath()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -341,32 +427,32 @@ export function ReelWaveTimeline({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (r: any) => isCut(r.id) && r.element && path.includes(r.element),
       )
-      if (cutReg) {
-        e.preventDefault()
-        selectCut(cutReg.id)
-        const clipId = cutReg.id.split('::')[0]
-        setMenu({ x: e.clientX, y: e.clientY, regionId: cutReg.id, clipId })
-        return
-      }
-
-      // if no cut hit, find which clip is at the cursor position by time
-      // get the waveform container and calculate time from click position
       if (!el.contains(e.target as Node)) return
+      const list = clipsRef.current
+      // clicked target → delete actions (click time correct at any zoom via internal scroll)
       const rect = el.getBoundingClientRect()
-      const x = e.clientX - rect.left
-      const time = (x / rect.width) * (ws.getDuration() || 0)
-
-      // find which clip this time falls into
-      for (const clip of clipsRef.current) {
-        const clipStart = clip.offset
-        const clipEnd = clip.offset + (clip.duration || 0)
-        if (time >= clipStart && time < clipEnd) {
-          e.preventDefault()
-          selectCut(null)
-          setMenu({ x: e.clientX, y: e.clientY, regionId: null, clipId: clip.id })
-          return
-        }
-      }
+      const pps = pxPerSecRef.current || rect.width / (ws.getDuration() || 1)
+      const clickTime = ((ws.getScroll?.() ?? 0) + (e.clientX - rect.left)) / pps
+      const clickClipId = cutReg
+        ? cutReg.id.split('::')[0]
+        : list.find((c) => clickTime >= c.offset && clickTime < c.offset + (c.duration || 0))?.id ??
+          null
+      // playhead → the transition seam
+      const phTime = ws.getCurrentTime?.() ?? globalTimeRef.current
+      const phIdx = list.findIndex(
+        (c) => phTime >= c.offset && phTime < c.offset + (c.duration || 0),
+      )
+      const seam = phIdx >= 0 ? nearestSeam(list[phIdx], phIdx, phTime) : null
+      if (!clickClipId && !seam) return
+      e.preventDefault()
+      selectCut(cutReg ? cutReg.id : null)
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        regionId: cutReg ? cutReg.id : null,
+        clipId: clickClipId,
+        seam,
+      })
     }
     el.addEventListener('contextmenu', onCtx)
 
@@ -443,7 +529,7 @@ export function ReelWaveTimeline({
         const cutEnd = c.offset + cut.end
         // Phase 8.3: Viewport-based rendering - skip invisible cuts
         if (isRegionVisible(cutStart, cutEnd)) {
-          regions.addRegion({
+          const cr = regions.addRegion({
             id: `${c.id}::${cut.id}`,
             start: cutStart,
             end: cutEnd,
@@ -451,11 +537,34 @@ export function ReelWaveTimeline({
             drag: true,
             resize: true,
           })
+          // A cut with a transition is BRIDGED — outline the removed region in gold so
+          // the indicator sits on the join (the cut's edges), not floating mid-gap.
+          if (cut.transition && cr.element) cr.element.classList.add('rwt-cut-trans')
         }
       }
     })
+
+    // Junction transition markers: a gold vertical line on each still-enabled clip-to-
+    // clip boundary. (Cut-join transitions are shown by outlining the cut above.) A
+    // zero-length region renders as wavesurfer's native marker = a full-height line in
+    // `color`; `.rwt-trans` brightens + thickens it. Pointer-events off so right-clicks
+    // fall through to the clip beneath.
+    for (const m of transitionMarkers(clips, disabledJunctions)) {
+      const mk = regions.addRegion({
+        id: m.id,
+        start: m.time,
+        color: TRANS_COLOR,
+        drag: false,
+        resize: false,
+      })
+      if (mk.element) {
+        mk.element.style.pointerEvents = 'none'
+        mk.element.classList.add('rwt-trans')
+        mk.element.title = 'clip transition'
+      }
+    }
     programmatic.current = false
-  }, [ready, clips, activeId, pxPerSec, viewportTime])
+  }, [ready, clips, activeId, pxPerSec, viewportTime, disabledJunctions])
 
   // smooth playhead from the active video (rAF); offset read live via refs
   useEffect(() => {
@@ -466,6 +575,7 @@ export function ReelWaveTimeline({
       const c = clipsRef.current.find((cl) => cl.id === activeIdRef.current)
       if (!c) return // active clip isn't on this page → no playhead here
       wsRef.current?.setTime(c.offset + v.currentTime)
+      positionPlayheadRef.current()
     }
     const loop = () => {
       sync()
@@ -499,20 +609,15 @@ export function ReelWaveTimeline({
   useEffect(() => {
     if (!ready || playingRef.current) return
     wsRef.current?.setTime(globalTime)
+    positionPlayheadRef.current()
   }, [globalTime, ready])
 
-  // hide the cursor when the active clip isn't on this page (you switched pages
-  // away from the playing/selected clip) — otherwise it'd sit wrongly at 0
+  // reposition the custom playhead on zoom / page / scroll changes (these don't move
+  // the video, so the rAF/scrub paths above don't fire)
   useEffect(() => {
-    const ws = wsRef.current
-    if (!ws || !ready) return
-    const onPage = clips.some((c) => c.id === activeId)
-    try {
-      ws.setOptions({ cursorWidth: onPage ? 2 : 0 })
-    } catch {
-      /* not ready */
-    }
-  }, [activeId, clips, ready])
+    if (!ready) return
+    positionPlayheadRef.current()
+  }, [ready, pxPerSec, viewportTime, activeId, clips])
 
   // delete the selected cut (Backspace/Delete); Escape clears selection
   useEffect(() => {
@@ -533,6 +638,37 @@ export function ReelWaveTimeline({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // ← / → step the playhead one frame, so you can land exactly on a cut/seam before
+  // right-clicking to add a transition there. Hold to repeat; zoom in to see single
+  // frames (one frame is sub-pixel at fit zoom).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      const ae = document.activeElement as HTMLElement | null
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable))
+        return
+      const ws = wsRef.current
+      const list = clipsRef.current
+      if (!ws || !list.length) return
+      e.preventDefault()
+      // step from the REAL cursor position — globalTime state goes stale during playback
+      const cur = ws.getCurrentTime?.() ?? globalTimeRef.current
+      const here = clipAt(cur)
+      const fps = here?.fps && here.fps > 0 ? here.fps : 30
+      const total = list.reduce((a, c) => a + (c.duration || 0), 0)
+      const next = Math.max(
+        0,
+        Math.min(total, cur + (e.key === 'ArrowRight' ? 1 : -1) / fps),
+      )
+      ws.setTime?.(next) // move the cursor + our overlay now, then seek the video
+      positionPlayheadRef.current()
+      onScrubRef.current(next)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 'b' key: mark cut start, then end → manual cut on the active clip
@@ -625,6 +761,7 @@ export function ReelWaveTimeline({
       const endTime = ((scrollLeft + containerWidth) / pxPerSec) * (duration / (duration || 1))
 
       setViewportTime({ start: startTime, end: endTime })
+      positionPlayheadRef.current()
     }
 
     // Update on scroll
@@ -659,14 +796,28 @@ export function ReelWaveTimeline({
         <button onClick={() => zoomTo(0)}>fit</button>
         <span className="b-hint">
           {pendingMsg ??
-            'drag empty to cut · b sets in/out · click a cut then ⌫ / right-click to delete'}
+            'drag empty to cut · ←/→ step a frame · right-click → add transition · b sets in/out'}
         </span>
       </div>
-      <div ref={containerRef} className="waveform" />
+      <div className="waveform-wrap">
+        <div ref={containerRef} className="waveform" />
+        <div ref={playheadRef} className="rwt-playhead" />
+      </div>
       {menu && (
         <div className="rwt-menu" style={{ left: menu.x, top: menu.y }}>
+          {menu.seam && (
+            <button
+              onClick={() => {
+                toggleSeam(menu.seam!)
+                setMenu(null)
+              }}
+            >
+              {menu.seam.on ? 'Remove transition at playhead' : 'Add transition at playhead'}
+            </button>
+          )}
           {menu.regionId && (
             <button
+              className="rwt-menu-del"
               onClick={() => {
                 deleteRegion(menu.regionId)
                 setMenu(null)
@@ -677,6 +828,7 @@ export function ReelWaveTimeline({
           )}
           {menu.clipId && (
             <button
+              className="rwt-menu-del"
               onClick={() => {
                 const clipId = menu.clipId!
                 setMenu(null)

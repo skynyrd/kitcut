@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { nearestSnap } from '../components/ReelWaveTimeline'
+import { nearestSnap } from '../components/timelineGeometry'
 
 describe('nearestSnap', () => {
   const targets = [0, 10, 25]

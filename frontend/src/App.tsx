@@ -27,6 +27,7 @@ import {
   replaceCuts,
   resetTranscription,
   setHiddenWords,
+  setJunctionTransition,
   setRemovedWords,
   startTranscribe,
   updateCutParams,
@@ -45,6 +46,7 @@ import {
 } from './api'
 import { ReelSidebar } from './components/ReelSidebar'
 import { ReelSwitcher } from './components/ReelSwitcher'
+import { ReelTimeline } from './components/ReelTimeline'
 import { ReelWaveTimeline } from './components/ReelWaveTimeline'
 import { SilenceControls } from './components/SilenceControls'
 import { TranscriptView, type Gap } from './components/TranscriptView'
@@ -85,6 +87,10 @@ function App() {
   const [preview, setPreview] = useState(true)
   const [subs, setSubs] = useState(true)
   const [currentTime, setCurrentTime] = useState(0)
+  // phase 18: try the new lane-based timeline (persisted); old reel stays default
+  const [newTimeline, setNewTimeline] = useState(
+    () => localStorage.getItem('kitcut.newTimeline') === '1',
+  )
 
   const paramTimer = useRef<number | null>(null)
   const cutTimer = useRef<number | null>(null)
@@ -686,6 +692,19 @@ function App() {
     }, 200)
   }
 
+  // Toggle the auto clip-to-clip transition that follows `leftClipId`, then refresh
+  // so the "T" markers reflect the new state.
+  async function onToggleJunction(leftClipId: string, enabled: boolean) {
+    const r = reelRef.current
+    if (!r) return
+    try {
+      await setJunctionTransition(r.id, leftClipId, enabled)
+      await refreshTimeline()
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
   // Cut/restore a non-speech gap from the transcript. Manual layer only: adds a
   // manual cut, or (restore) drops manual cuts overlapping the span — VAD auto-cuts
   // are left alone. Routes through the same path as timeline cut edits.
@@ -1025,6 +1044,20 @@ function App() {
                       <label className="check inline">
                         <input
                           type="checkbox"
+                          checked={newTimeline}
+                          onChange={(e) => {
+                            setNewTimeline(e.target.checked)
+                            localStorage.setItem(
+                              'kitcut.newTimeline',
+                              e.target.checked ? '1' : '0',
+                            )
+                          }}
+                        />
+                        New timeline (beta)
+                      </label>
+                      <label className="check inline">
+                        <input
+                          type="checkbox"
                           checked={preview}
                           onChange={(e) => setPreview(e.target.checked)}
                         />
@@ -1077,18 +1110,25 @@ function App() {
                       </button>
                     </div>
                   )}
-                  <ReelWaveTimeline
-                    reelId={timeline.reel.id}
-                    clips={pageClips}
-                    clipIds={pageClipIds}
-                    activeId={activeId}
-                    globalTime={globalTime}
-                    audioRev={audioRev}
-                    onScrub={onScrub}
-                    onClipCutsChange={onClipCutsChange}
-                    onRemoveClip={onRemoveClip}
-                    videoRef={videoRef}
-                  />
+                  {(() => {
+                    const Timeline = newTimeline ? ReelTimeline : ReelWaveTimeline
+                    return (
+                      <Timeline
+                        reelId={timeline.reel.id}
+                        clips={pageClips}
+                        clipIds={pageClipIds}
+                        activeId={activeId}
+                        globalTime={globalTime}
+                        audioRev={audioRev}
+                        disabledJunctions={timeline.reel.disabled_junctions ?? []}
+                        onScrub={onScrub}
+                        onClipCutsChange={onClipCutsChange}
+                        onRemoveClip={onRemoveClip}
+                        onToggleJunction={onToggleJunction}
+                        videoRef={videoRef}
+                      />
+                    )
+                  })()}
                   {transcribed && cutParams && (
                     <SilenceControls
                       params={scope === 'all' && reel ? reel.default_cut_params : cutParams}

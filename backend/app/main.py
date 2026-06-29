@@ -427,6 +427,30 @@ def update_reel_cut_params(reel_id: str, params: CutParams, apply: str = "all") 
     return _reel_detail(reel)
 
 
+class JunctionTransition(BaseModel):
+    left_clip_id: str
+    enabled: bool
+
+
+@app.put("/api/reels/{reel_id}/junction-transitions")
+def set_junction_transition(reel_id: str, body: JunctionTransition) -> dict:
+    """Toggle the auto clip-to-clip transition that follows `left_clip_id`.
+
+    Clip junctions are on by default; disabling adds the left clip to the reel's
+    opt-out set (`disabled_junctions`), kept ordered by the running order.
+    """
+    reel = _require_reel(reel_id)
+    if body.left_clip_id not in reel.clip_ids:
+        raise HTTPException(status_code=404, detail="clip not in reel")
+    disabled = set(reel.disabled_junctions)
+    disabled.discard(body.left_clip_id) if body.enabled else disabled.add(
+        body.left_clip_id
+    )
+    reel.disabled_junctions = [c for c in reel.clip_ids if c in disabled]
+    storage.save_reel(reel)
+    return _reel_detail(reel)
+
+
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str) -> Project:
     project = _require_project(project_id)

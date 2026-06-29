@@ -40,6 +40,7 @@ export interface CutRegion {
   end: number
   source: 'auto' | 'manual'
   kind: SilenceKind
+  transition?: boolean // add a Slide+swipe at the join this cut leaves behind
 }
 
 export interface CutStats {
@@ -103,6 +104,7 @@ export interface Reel {
   name: string
   clip_ids: string[]
   default_cut_params: CutParams
+  disabled_junctions: string[] // left-clip ids whose following clip-junction transition is off
 }
 
 export interface ReelDetail {
@@ -355,6 +357,21 @@ export async function updateReelCutParams(
     body: JSON.stringify(params),
   })
   if (!res.ok) throw new Error(`update reel params failed: ${res.status}`)
+  return res.json()
+}
+
+/** Toggle the auto clip-to-clip transition that follows `leftClipId`. */
+export async function setJunctionTransition(
+  id: string,
+  leftClipId: string,
+  enabled: boolean,
+): Promise<ReelDetail> {
+  const res = await fetch(`/api/reels/${id}/junction-transitions`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ left_clip_id: leftClipId, enabled }),
+  })
+  if (!res.ok) throw new Error(`set junction transition failed: ${res.status}`)
   return res.json()
 }
 
